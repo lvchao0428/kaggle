@@ -1,0 +1,2 @@
+url: https://www.kaggle.com/contact#/account/verify/why
+
