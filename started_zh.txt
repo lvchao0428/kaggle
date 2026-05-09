@@ -1,0 +1,370 @@
+# 说明：由网页粘贴的 Orbit Wars 资料中文译本；技术字段名、代码与公式保持英文原文便于对照实现。
+# （原顶部网站导航略）
+
+Kaggle · 精选模拟赛 · 赛程以官网为准
+
+Orbit Wars（轨道战争）
+在围绕太阳的连续二维空间里征服行星。支持 2 人或 4 人的即时战略游戏。
+
+在浏览器中游玩 | 提交 Agent
+概览
+---
+比赛目标
+---
+打造并/或训练 AI 机器人，在新颖的多智能体环境中进行 1v1 或 4 人混战（FFA），与其他已提交的 agent 对局。
+
+（赛程日期与「剩余时间」以 Kaggle 官网当前页面为准；以下为原文摘录的示例时间线。）
+
+合并与报名
+描述
+---
+欢迎来到 Orbit Wars！指挥舰队，征服虚空。Orbit Wars 在 2010 年 Planet Wars 挑战的无情策略之上，加入了新鲜、刺激的机制。在太阳系中发射大规模舰队，机动超越对手，夺取绝对的轨道霸权。
+
+评测
+---
+每个比赛日，你的队伍最多可向比赛提交 5 个 agent（机器人）。每次提交会在天梯上与技能分相近的其他 bot 进行若干场对局（Episode）。随着时间推移，胜则技能分上升，负则下降，平局则互相拉近。为减少并行参与的 bot 数量、增加每支队伍参与的对局数，系统只追踪**最新 2 次**提交，并以其作为最终计入评分的提交。
+
+每个已提交的 bot 在比赛结束前都会持续参与对局，较新的提交会获得更高频率的对局。排行榜上只展示你得分最高的那个 bot，但你可在「Submissions」页面查看所有提交的表现。
+
+每次提交都有一个估计技能等级，用高斯 N(μ, σ²) 建模：μ 为估计实力，σ 为该估计的不确定性（会随时间减小）。
+
+上传提交后，会先进行一场**校验对局**：该提交与自身副本对战，确保运行正常。若对局失败，提交记为 Error，可下载 agent 日志排查原因。若成功，则用 μ₀=600 初始化该提交，并进入「全部提交」池参与持续评测。
+
+系统会从「全部提交」池中反复抽取对局，尽量匹配分数相近的提交以获得公平对局。新提交的 agent 会在一段时间内获得**更高的对局频率**，以便更快得到反馈。
+
+排名系统
+---
+一场对局结束后，会更新该场中所有相关提交的等级估计。若一方获胜，则提高其 μ、降低对手的 μ；若平局，则把双方的 μ 向二者均值拉近。更新幅度与「相对原先 μ 的预期结果的偏差」有关，也与每个提交的 σ（不确定性）有关；同时会根据本场信息量降低 σ。**对局中赢多少分、输多少分，不影响技能分的更新公式。**
+
+最终评测：在提交截止日（原文：2026 年 6 月 23 日）之后，系统将锁定新增提交。自该日起约两周内仍会继续对局；该阶段结束后排行榜定格。
+
+时间线（原文日期，请与官网核对）
+---
+2026-04-16 — 开赛日。
+2026-06-16 — 报名截止。须在此前接受比赛规则方可参赛。
+2026-06-16 — 组队/合并截止。此后不可再加入或合并队伍。
+2026-06-23 — 最终提交截止。
+2026-06-24 至约 2026-07-08 — 继续对局直至榜收敛；结束后排行榜为最终结果。
+
+除非另有说明，上述日期均为对应日期的 **UTC 23:59**。赛方保留必要时调整赛程的权利。
+
+奖金（原文）
+---
+第 1–10 名各 5,000 美元（以官网为准）。
+
+入门
+---
+编写 bot 并提交所需的全部说明与 Starter Kit 见官方 starter kit。
+
+请务必阅读下文赛事规格，了解本年度机制。
+
+如何游玩 Orbit Wars
+概述
+---
+玩家各自从一颗母星起步，通过派遣舰队占领中立与敌方行星以争夺地图。棋盘为 **100×100** 连续空间，中心为太阳。行星绕日公转，彗星沿椭圆轨迹穿过地图，舰队沿**直线**运动。游戏共 **500** 回合。结束时，**己方行星上舰艇总数 + 己方舰队中舰艇总数** 最多者获胜。
+
+棋盘布局
+---
+棋盘：100×100 连续空间，原点在左上角。
+太阳：中心 (50, 50)，半径 10。航线穿入太阳范围的舰队被消灭。
+对称性：所有行星与彗星关于中心 **四象限镜像** 放置：(x,y)、(100-x,y)、(x,100-y)、(100-x,100-y)，以保证不同出生点的公平性。
+
+行星
+---
+每颗行星表示为 [id, owner, x, y, radius, ships, production]。
+
+owner：玩家 ID（0–3），中立为 -1。
+radius：由产量决定：1 + ln(production)。产量越高，行星物理半径越大。
+production：整数 1–5。被占领后每回合产出等量舰艇。
+ships：当前驻防。初始在 5–99 之间（偏低值略多）。
+
+行星类型
+---
+轨道行星：若 orbital_radius + planet_radius < 50，则绕太阳以恒定角速度旋转（每回合 0.025–0.05 弧度，每局随机）。用观测中的 initial_planets 与 angular_velocity 预测位置。
+静态行星：距中心更远的不旋转。
+地图上共 20–40 颗行星（5–10 组，每组 4 颗对称）。至少 3 组保证为静态，至少 1 组保证在轨道上。
+
+母星
+---
+随机选一组合对称四星组作为出生点。2 人局：玩家出生在**对角**象限（如 Q1 与 Q4）。4 人局：每人占据该组四星之一。母星初始 **10** 艘船。
+
+舰队
+---
+每支舰队表示为 [id, owner, x, y, angle, from_planet_id, ships]。
+
+angle：航向（弧度）。
+ships：舰队规模（航行途中不变）。
+
+舰队速度
+舰队规模越大速度越快，服从对数曲线：
+
+speed = 1.0 + (maxSpeed - 1.0) * (log(ships) / log(1000)) ^ 1.5
+
+1 艘船：每回合 1.0 单位。
+大舰队趋近最大速度（默认 maxSpeed = 6.0）。
+约 500 艘船速度约 5；约 1000 艘达上限。
+
+舰队运动
+每回合舰队以计算得到的速度沿直线前进。若发生以下情况则舰队被移除：
+
+- 出界（离开 100×100 场地）
+- 穿过太阳（线段与太阳圆距离小于太阳半径）
+- 与任意行星碰撞（线段与行星圆距离小于行星半径），触发战斗
+
+碰撞检测是**连续**的：检测从旧位置到新位置的**整条线段**，不仅检测端点。
+
+舰队发射
+每回合你的 agent 返回若干条动作：[from_planet_id, direction_angle, num_ships]。
+
+- 只能从己方行星发射
+- 不能超过行星当前持有船数
+- 舰队在行星边缘、给定方向上生成
+- 同一回合可从同一或不同行星多次发射
+
+彗星
+彗星是沿高度椭圆轨道穿过棋盘的临时系外天体。在第 **50、150、250、350、450** 步，每组 4 颗（每象限一颗）成组生成。
+
+半径：固定 1.0。
+产量：被占领后每回合 1 艘。
+初始船数：随机偏低（4 次 1–99 随机取最小值）。同组 4 颗彗星初始船数相同。
+速度：由 cometSpeed 配置（默认每回合 4.0 单位）。
+识别：观测中 comet_planet_ids 标明哪些 id 是彗星。彗星也出现在 planets 数组中，遵守普通行星规则（占领、产兵、发射、战斗）。
+彗星离开棋盘时与驻防一并移除。每回合在**舰队发射前**移除已离场彗星，故无法从即将离场的彗星上发射。
+
+观测字段 comets 含彗星组数据：paths（每颗彗星的完整轨迹）、path_index（当前在路径上的位置），可用于预测未来位置。
+
+回合顺序
+每回合按以下顺序执行：
+
+1. 彗星离场：移除已出界的彗星
+2. 彗星生成：在指定步数生成新彗星组
+3. 舰队发射：处理所有玩家动作，生成新舰队
+4. 生产：所有被占领行星（含彗星）产兵
+5. 舰队移动：所有舰队沿航向前进；检测出界、太阳、行星碰撞；撞进行星的舰队进入战斗队列
+6. 行星自转与彗星移动：轨道行星旋转，彗星沿路径前进；被移动行星/彗星「扫到」的舰队进入与其的战斗
+7. 战斗结算：结算所有已排队行星战斗
+
+战斗
+当一支或多支舰队与行星碰撞（飞入或被移动天体扫入），战斗规则：
+
+- 到达舰队按 owner 分组；同一 owner 的船数相加
+- **最大**的进攻方与**第二大**进攻方交战，差值为存活进攻兵力
+- 若有进攻方存活：
+  - 若与行星同属一方：存活船加入驻防
+  - 若属不同 owner：存活者与驻防交战；若进攻方总量超过驻防，行星易主，驻防变为盈余
+- 若两大进攻方**平局**：所有进攻船全灭（无幸存者）
+
+得分与终止
+游戏在以下情况结束：
+
+- 达到步数上限：500 回合
+- 淘汰：仅剩一个玩家（或无人）仍拥有行星或舰队
+
+最终得分 = 己方行星上船数总和 + 己方舰队中船数总和。得分高者胜。
+
+观测字段参考
+---
+planets — [[id, owner, x, y, radius, ships, production], ...] — 含彗星在内的全部行星
+fleets — [[id, owner, x, y, angle, from_planet_id, ships], ...] — 现役舰队
+player — int — 你的玩家 ID（0–3）
+angular_velocity — float — 内圈行星旋转角速度（弧度/回合）
+initial_planets — 游戏开始时行星快照
+comets — [{planet_ids, paths, path_index}, ...] — 彗星组数据
+comet_planet_ids — [int, ...] — 彗星行星 ID
+remainingOverageTime — float — 每步超时宽限剩余预算（秒）
+
+动作格式
+---
+返回动作列表：
+
+[[from_planet_id, direction_angle, num_ships], ...]
+
+from_planet_id：己方行星 ID。
+direction_angle：弧度（0 = 向右，π/2 = 向下）。
+num_ships：派出整数艘船。
+
+返回 [] 表示本回合不行动。
+
+Agent 便利接口
+---
+模块导出命名元组便于访问字段：
+
+from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
+
+def agent(obs):
+    planets = [Planet(*p) for p in obs.get("planets", [])]
+    fleets = [Fleet(*f) for f in obs.get("fleets", [])]
+    player = obs.get("player", 0)
+
+    for p in planets:
+        print(p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production)
+
+    return []  # list of [from_planet_id, angle, num_ships]
+
+Configuration（配置）
+---
+Parameter      Default   说明
+episodeSteps   500       最大回合数
+actTimeout     1         每回合决策时限（秒）
+shipSpeed      6.0       舰队最大速度
+sunRadius      10.0      太阳半径
+boardSize      100.0     棋盘边长
+cometSpeed     4.0       彗星速度（单位/回合）
+
+---
+
+AGENTS.md · Orbit Wars 入门（译文）
+---
+本指南介绍如何编写 agent、本地测试并提交到 Kaggle Orbit Wars。
+
+游戏概述
+Orbit Wars 是 100×100 棋盘、中心有太阳的 RTS。玩家通过舰队在行星间扩张。
+
+（译注：下文「行星每回合产兵与半径成比例」与上方正式规格不完全一致；**实现时请以上文「production 为 1–5 整数每回合产船」为准**。）
+
+- 内圈行星绕日转；外圈静态
+- 舰队从起始行星以给定角度直线飞行
+- 舰队速度与规模有关（1 艘约 1/回合，大舰队最高约 6/回合）
+- 战斗：舰队到达后与驻防相抵，驻防被扣至易主逻辑（详见上文正式战斗规则）
+- 太阳：撞太阳舰队消灭
+- 彗星：沿椭圆轨迹穿场的临时行星
+- 胜利条件：到时船数总和最高，或最后仍有星球/舰队的一方
+
+完整规则与默认配置见上文「How to Play Orbit Wars」。
+
+你的 Agent
+agent 是函数：输入观测，返回 move 列表。
+
+观测字段：
+player — 你的 ID（0–3）
+planets — [id, owner, x, y, radius, ships, production]，owner=-1 为中立
+fleets — [id, owner, x, y, angle, from_planet_id, ships]
+angular_velocity — 内圈行星角速度（弧度/回合）
+
+动作：每条为 [from_planet_id, angle_in_radians, num_ships]。
+
+示例 — 最近行星狙击（代码保持英文）：
+
+import math
+from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
+
+def agent(obs):
+    moves = []
+    player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
+    raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
+    planets = [Planet(*p) for p in raw_planets]
+
+    my_planets = [p for p in planets if p.owner == player]
+    targets = [p for p in planets if p.owner != player]
+
+    if not targets:
+        return moves
+
+    for mine in my_planets:
+        nearest = min(targets, key=lambda t: math.hypot(mine.x - t.x, mine.y - t.y))
+        ships_needed = nearest.ships + 1
+        if mine.ships >= ships_needed:
+            angle = math.atan2(nearest.y - mine.y, nearest.x - mine.x)
+            moves.append([mine.id, angle, ships_needed])
+
+    return moves
+
+本地测试
+安装环境（须 kaggle-environments >= 1.28.0）：
+
+pip install "kaggle-environments>=1.28.0"
+
+Python 或 Notebook 中运行一局：
+
+from kaggle_environments import make
+
+env = make("orbit_wars", configuration={"seed": 42}, debug=True)
+env.run(["main.py", "random"])
+
+final = env.steps[-1]
+for i, s in enumerate(final):
+    print(f"Player {i}: reward={s.reward}, status={s.status}")
+
+# Notebook 可视化
+env.render(mode="ipython", width=800, height=600)
+
+配置 Kaggle CLI
+pip install kaggle
+
+注册 https://www.kaggle.com；在 https://www.kaggle.com/settings/api 生成 API Token。
+
+推荐：将 token 写入 ~/.kaggle/access_token 并 chmod 600。
+
+其它登录方式：kaggle auth login；或环境变量 KAGGLE_API_TOKEN。
+
+验证：kaggle competitions list -s "orbit wars"
+
+查找比赛、阅读页面：
+kaggle competitions pages orbit-wars
+kaggle competitions pages orbit-wars --content
+
+接受规则
+在 https://www.kaggle.com/competitions/orbit-wars 点击 Join Competition。
+
+确认已参赛：kaggle competitions list --group entered
+
+下载数据：
+kaggle competitions download orbit-wars -p orbit-wars-data
+
+提交
+根目录须有 main.py 并提供 agent 函数。
+
+单文件：
+kaggle competitions submit orbit-wars -f main.py -m "Nearest planet sniper v1"
+
+多文件打包（tar.gz 根目录含 main.py）：
+tar -czf submission.tar.gz main.py helper.py model_weights.pkl
+kaggle competitions submit orbit-wars -f submission.tar.gz -m "Multi-file agent v1"
+
+Notebook 提交：
+kaggle competitions submit orbit-wars -k YOUR_USERNAME/orbit-wars-agent -f submission.tar.gz -v 1 -m "Notebook agent v1"
+
+查看提交：kaggle competitions submissions orbit-wars
+
+对局列表：kaggle competitions episodes <SUBMISSION_ID>
+CSV：kaggle competitions episodes <SUBMISSION_ID> -v
+
+回放：kaggle competitions replay <EPISODE_ID>
+日志：kaggle competitions logs <EPISODE_ID> 0
+
+排行榜：kaggle competitions leaderboard orbit-wars -s
+
+典型工作流（与原文相同，注释译为中文）
+
+# 本地测试
+python -c "
+from kaggle_environments import make
+env = make('orbit_wars', debug=True)
+env.run(['main.py', 'random'])
+print([(i, s.reward) for i, s in enumerate(env.steps[-1])])
+"
+
+# 提交
+kaggle competitions submit orbit-wars -f main.py -m "v1"
+
+# 状态
+kaggle competitions submissions orbit-wars
+
+# 对局
+kaggle competitions episodes <SUBMISSION_ID>
+
+# 回放与日志
+kaggle competitions replay <EPISODE_ID>
+kaggle competitions logs <EPISODE_ID> 0
+
+# 榜单
+kaggle competitions leaderboard orbit-wars -s
+
+引用
+Bovard Doerschuk-Tiberi, Walter Reade, and Addison Howard. Orbit Wars. https://kaggle.com/competitions/orbit-wars, 2026. Kaggle.
+
+---
+页脚统计与标签（原文数据可能已变，仅作参考）
+主办：Kaggle
+总奖池等以官网为准
+标签：Games, Artificial Intelligence, Reinforcement Learning, Custom Metric

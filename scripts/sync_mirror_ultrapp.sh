@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Sync this repo to the SSH mirror (same credentials as scp).
+# Default: charlie@www.ultrapp.online:/home/charlie/project/kaggle
+#
+# Requires: rsync on both ends (install: apt install rsync / brew install rsync).
+# Pure scp cannot mirror cleanly (no --delete, slow); rsync over ssh is the usual approach.
+#
+# Usage:
+#   ./scripts/sync_mirror_ultrapp.sh
+#   ./scripts/sync_mirror_ultrapp.sh --dry-run
+#   REMOTE_HOST=other.host ./scripts/sync_mirror_ultrapp.sh
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REMOTE_USER="${REMOTE_USER:-charlie}"
+REMOTE_HOST="${REMOTE_HOST:-www.ultrapp.online}"
+REMOTE_DIR="${REMOTE_DIR:-/home/charlie/project/kaggle}"
+
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    *)
+      echo "Unknown option: $arg (only --dry-run / -n supported)" >&2
+      exit 1
+      ;;
+  esac
+done
+
+RSYNC=(rsync -avz)
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  RSYNC+=(--dry-run)
+fi
+
+# Mirror: drop remote files not present locally (careful if you store extra files only on server).
+RSYNC+=(--delete)
+
+RSYNC+=(
+  --human-readable
+  --exclude ".venv/"
+  --exclude "__pycache__/"
+  --exclude "*.py[cod]"
+  --exclude ".pytest_cache/"
+  --exclude ".mypy_cache/"
+  --exclude ".ruff_cache/"
+  --exclude "*.egg-info/"
+  --exclude ".DS_Store"
+  --exclude "dist/*.tar.gz"
+)
+
+echo "Sync: $ROOT/ -> ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
+"${RSYNC[@]}" "$ROOT/" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
