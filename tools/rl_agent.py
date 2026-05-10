@@ -54,12 +54,33 @@ class Transition:
     step: int
     state_feat: np.ndarray          # state-only 14-dim feature (for distillation later)
     shaped_reward: float = 0.0      # Phase 2: set by rollout_worker after game ends
+    oob_penalty: float = 0.0        # v15: modeled straight-line endpoint off-board
 
 
 def _softmax(x: np.ndarray) -> np.ndarray:
     z = x - x.max()
     e = np.exp(z)
     return e / e.sum()
+
+
+def _oob_penalty_for_plan(state: "v11.GameState", plan: "v11.Plan") -> float:
+    """Penalize launches whose constant-speed straight endpoint leaves the board."""
+    m = 0.5
+    b = float(v11.BOARD)
+    pen = 0.0
+    for sid, did, ships in plan.actions:
+        sp = state.get(sid)
+        dp = state.get(did)
+        if sp is None or dp is None:
+            continue
+        n = max(1, int(ships))
+        ang, eta = v11.safe_aim(state, sp, dp, n)
+        spd = v11.fleet_speed(n, state.max_speed)
+        ex = sp.x + math.cos(ang) * spd * eta
+        ey = sp.y + math.sin(ang) * spd * eta
+        if ex < m or ex > b - m or ey < m or ey > b - m:
+            pen -= 0.05
+    return pen
 
 
 class RLAgent:
@@ -119,6 +140,7 @@ class RLAgent:
             arbiter.commit_fallback()
 
             if self.record:
+                oob_pen = _oob_penalty_for_plan(state, plans[chosen_idx])
                 self.transitions.append(Transition(
                     obs_feat=all_feats[chosen_idx],
                     plan_feats=all_feats,
@@ -128,6 +150,7 @@ class RLAgent:
                     plan_score_net=float(plan_logit),
                     step=state.step,
                     state_feat=state_features(state),
+                    oob_penalty=float(oob_pen),
                 ))
             return arbiter.moves
         except Exception:

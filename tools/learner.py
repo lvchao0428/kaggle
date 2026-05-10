@@ -87,6 +87,7 @@ def games_to_tensors(games: List[Dict], device: torch.device,
         rewards = np.zeros(T, dtype=np.float32)
         for i, t in enumerate(ts):
             rewards[i] += float(t.get("shaped_reward", 0.0))
+            rewards[i] += float(t.get("oob_penalty", 0.0))
         rewards[-1] += outcome  # terminal signal
 
         values = np.array([t["value_pred"] for t in ts], dtype=np.float32)

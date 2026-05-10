@@ -133,6 +133,7 @@ def play_one_game(rl_agent: RLAgent, opponent, seed: int) -> Dict:
             "state_feat": t.state_feat.tolist(),
             # Phase 2: dense shaped reward for this step.
             "shaped_reward": getattr(t, "shaped_reward", 0.0),
+            "oob_penalty": getattr(t, "oob_penalty", 0.0),
         }
         for t in rl_agent.transitions
     ]
