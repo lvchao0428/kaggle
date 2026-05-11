@@ -1,0 +1,120 @@
+# -*- mode: org -*-
+Common Lisp Starter Package v0.1 for Planet Wars
+
+This file contains specific information about the Common Lisp (CL)
+starter package for the [[http://ai-contest.com/][Planet Wars Google AI Challenge]].
+
+Based on the [[http://ai-contest.com/forum/viewtopic.php?f=18&t=421][work]] of Erik Winkels (aerique@xs4all.nl). Refactored and
+bloated rather mercilessly by Gabor Melis (mega@retes.hu).
+
+* Usage
+
+First, read the [[http://ai-contest.com/using_the_tools.php][Using the Tools]] page on the contest site. This
+explains how to run to example bots against each other. The CL starter
+package contains the same tools and example bots, so you can use the
+same invocation to run an example:
+
+  java -jar tools/PlayGame.jar maps/map7.txt 1000 1000 game.log \
+      "java -jar example_bots/RandomBot.jar" \
+      "java -jar example_bots/DualBot.jar" | java -jar tools/ShowGame.jar
+
+Note that Java needs to be installed on your system.
+
+The version of the tools is [[http://ai-contest.com/forum/viewtopic.php?f=18&t=534][a1k0n's v1.2]].
+
+The script =bin/run-bot.sh= loads the planet-wars asdf system and
+calls the function PW:PLAY. It can be passed as a player to
+=PlayGame.jar=:
+
+  java -jar tools/PlayGame.jar maps/map7.txt 1000 1000 game.log \
+      "./bin/run-bot.sh" \
+      "java -jar example_bots/DualBot.jar" | java -jar tools/ShowGame.jar
+
+It may take a while to compile and may even time out. In this case
+just retry (no need for compilation the second time) or compile the
+bot by running =make= that should load the planet-wars system and save
+the image as an executable named =MyBot=. The invocation to run the CL
+bot is almost the same as the above but replaces the first bot with a
+call to =MyBot=:
+
+  java -jar tools/PlayGame.jar maps/map7.txt 1000 1000 game.log \
+      "./MyBot" \
+      "java -jar example_bots/DualBot.jar" | java -jar tools/ShowGame.jar
+
+** Slime
+
+To run SBCL as it will be on the server (with the maximum heap size
+set) do =C-u M-x slime= in emacs and enter =sh
+/path/to/starter-kit/bin/run-sbcl.sh= at the =Run lisp:= prompt, then
+load =setup.lisp=.
+
+Or with an recent SBCL with ASDF v2, you may simply do:
+
+  (asdf:initialize-source-registry '(:source-registry
+                                     (:tree "/path/to/starter-kit/")
+                                      :ignore-inherited-configuration))
+
+before =(REQUIRE :PLANET-WARS)=.
+
+** Submitting the bot
+
+=make submission= creates a zip file that can be used to submit a bot
+to the competition. Once submitted your code is compiled on the server
+with:
+
+  sbcl --disable-ldb --lose-on-corruption --end-runtime-options \
+      --no-sysinit --no-userinit --disable-debugger --load MyBot.lisp \
+      --eval "(save-lisp-and-die \"MyBot\" :executable t :toplevel #'pwbot::main)"
+
+This is what a =make= does in the starter package. Test the =MyBot=
+binary before submitting.
+
+At the time of this writing the memory available in the sandbox for
+bots is not specified, =run-sbcl.sh= defaults to 768M for the heap.
+*** TODO fix heap limit in executables
+The SAVE-RUNTIME-OPTIONS parameter to SAVE-LISP-AND-DIE is only
+available since SBCL 1.0.31 so the executables have no such limit.
+Revisit this when the exact SBCL version on the server is known.
+*** TODO automatically submit the zip file to the server with `curl`
+** ProxyBot
+
+To make working on your bot a little more natural / lispy I've
+included a proxy bot. This bot does nothing in itself except connect
+to another bot running at 127.0.0.1:41807 and pass game state and bot
+orders back and forth to the game engine and the other bot.
+
+This means you can keep your bot running in a permanent, in my case,
+Emacs + Slime session while the proxy bot is the one that gets started
+up and shut down every time. So you don't have to recompile your bot
+every time in case it times out, but more importantly you don't lose
+your bot's state when it crashes since you'll just drop into the
+debugger and can inspect the situation.
+
+However, there's a slight speed penalty because of the extra code and
+communications.
+
+In SBCL the server process to which the proxy bot connects can be
+started with:
+
+ =(pw:start-server-for-proxy-bot)=
+
+On unithread builds this creates a single thread that accepts
+connections calls PW:PLAY on the socket stream and when the game is
+finished it accepts a new connection.
+
+On multithreaded builds (#+SB-THREAD) it calls PW:PLAY in a new thread
+so multiple proxy bots can play at the same time.
+
+*** Running the ProxyBot
+
+First, compile the proxy bot with =make ProxyBot=. Then - assuming
+there is a real bot to connect to - it is as easy to use as running:
+
+  java -jar tools/PlayGame.jar maps/map7.txt 1000 1000 game.log \
+      "./ProxyBot" \
+      "java -jar example_bots/DualBot.jar" | java -jar tools/ShowGame.jar
+
+If that fails (proxy bot times out) check =proxy-bot.log=.
+
+You can also use the proxy bot with compiling by passing
+=./bin/run-proxy-bot.sh= to the engine instead of =./ProxyBot=.
