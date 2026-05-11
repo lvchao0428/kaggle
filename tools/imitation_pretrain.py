@@ -41,8 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import submission_v11 as v11  # type: ignore
 from tools.feature_extractor import combined_features, state_features
+import submission_v11 as v11  # type: ignore  # registered by feature_extractor
 
 # ── lazy torch import so CPU-only machines can still import this module ──
 import torch

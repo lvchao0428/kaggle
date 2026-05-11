@@ -33,15 +33,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from submission_resolve import resolve_submission_path
+
+
 def _load_agent(version: str):
     """Load `submission_<version>.py` and return its `agent` callable.
     Special string "random" returns the literal string (kaggle-environments
     treats it as a built-in opponent)."""
     if version == "random":
         return "random"
-    path = ROOT / f"submission_{version}.py"
-    if not path.is_file():
-        raise FileNotFoundError(path)
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"submission_{version}_eval", path)
     if spec is None or spec.loader is None:
         raise ImportError(str(path))

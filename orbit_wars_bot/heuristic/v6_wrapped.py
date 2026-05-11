@@ -1,8 +1,9 @@
-"""Delegate to repo-root submission_v6.agent with stable import path."""
+"""Delegate to archived or active submission_v6.agent (stable import path)."""
 
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, List, Optional
@@ -15,7 +16,10 @@ def _load_submission_v6() -> ModuleType:
     if _SUB_V6 is not None:
         return _SUB_V6
     root = Path(__file__).resolve().parents[2]
-    path = root / "submission_v6.py"
+    sys.path.insert(0, str(root))
+    from submission_resolve import resolve_submission_path
+
+    path = resolve_submission_path(root, "v6")
     spec = importlib.util.spec_from_file_location("submission_v6", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load submission_v6 from {path}")

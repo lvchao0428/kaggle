@@ -9,9 +9,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from submission_resolve import resolve_submission_path
+
 
 def load_module(version):
-    path = ROOT / f"submission_{version}.py"
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"submission_{version}_check", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"submission_{version}_check"] = mod

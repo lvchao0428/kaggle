@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from submission_resolve import resolve_submission_path
+
 
 def _load_agent(mod_name: str, file_path: Path):
     spec = importlib.util.spec_from_file_location(mod_name, file_path)
@@ -85,16 +87,17 @@ def main():
 
     agents = {}
     for v in [x.strip() for x in args.versions.split(",") if x.strip()]:
-        path = ROOT / f"submission_v{v}.py"
-        if not path.exists():
-            print(f"Skip v{v}: missing {path}", file=sys.stderr)
+        try:
+            path = resolve_submission_path(ROOT, f"v{v}")
+        except FileNotFoundError:
+            print(f"Skip v{v}: missing submission_v{v}.py", file=sys.stderr)
             continue
         agents[f"v{v}"] = _load_agent(f"sub_v{v}", path)
 
     if args.head2head:
         if "v7" not in agents or "v8" not in agents:
-            ag7 = _load_agent("sub_v7", ROOT / "submission_v7.py")
-            ag8 = _load_agent("sub_v8", ROOT / "submission_v8.py")
+            ag7 = _load_agent("sub_v7", resolve_submission_path(ROOT, "v7"))
+            ag8 = _load_agent("sub_v8", resolve_submission_path(ROOT, "v8"))
         else:
             ag7, ag8 = agents["v7"], agents["v8"]
 

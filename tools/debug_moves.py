@@ -9,12 +9,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from submission_resolve import resolve_submission_path
+
 SUN_X = SUN_Y = 50.0
 SUN_RADIUS = 10.0
 
 
 def load_agent(version: str):
-    path = ROOT / f"submission_{version}.py"
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"submission_{version}_debug", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load {path}")

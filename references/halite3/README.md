@@ -19,7 +19,7 @@ Community references (clone as needed; do not vendor into this repo by default):
 |-------------|------------------|
 | “Value per square / distance tradeoff” | `allocation/scoring.py` — `production`, `ships`, `dist`, `net_threat` |
 | Fleet drop timing | `_coordinated_attack` arrival alignment; expand with `simulation/forward.py` |
-| ML vs heuristics | RL in `rl/` — hybrid with `submission_v6.py` geometry (`safe_aim`) |
+| ML vs heuristics | RL in `rl/` — hybrid with `archive/legacy/submissions/submission_v6.py` geometry (`safe_aim`) |
 
 ### Checklist
 

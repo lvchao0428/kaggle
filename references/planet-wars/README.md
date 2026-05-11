@@ -16,9 +16,9 @@ The unofficial TCP test server mentioned on the page is **shut down**; treat the
 
 ### Mapping concepts → this repo
 
-- **Multi-line coordination:** `_coordinated_attack` and expansion in [`submission_v6.py`](../../submission_v6.py); extend via `orbit_wars_bot/allocation/scoring.py`.
+- **Multi-line coordination:** `_coordinated_attack` and expansion in [`submission_v6.py`](../../archive/legacy/submissions/submission_v6.py); extend via `orbit_wars_bot/allocation/scoring.py`.
 - **Simulation / “what if”:** Planet Wars–style rollouts → `orbit_wars_bot/simulation/forward.py` (env-backed or lightweight geometry).
-- **Fleets in flight:** Orbit Wars exposes `fleets` and turn order in `started.txt` / Kaggle specs; when simulating, mirror **production → movement → combat** order.
+- **Fleets in flight:** Orbit Wars exposes `fleets` and turn order in Kaggle specs (`archive/legacy/docs/` 等处有镜像文本); when simulating, mirror **production → movement → combat** order.
 
 ## Official site archival
 

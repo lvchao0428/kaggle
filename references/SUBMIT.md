@@ -2,12 +2,15 @@
 
 The graded bot must expose `agent(obs, config=None)` returning a list of moves.
 
-- **Planet Wars–style scaffold (global candidates + surplus + pulse):** [`submission_v8.py`](../submission_v8.py) — experimental; compare locally with `scripts/eval_compare_v6_v7.py`.
-- **当前默认（Planet Wars–style heuristic v7）：** submit [`submission_v7.py`](../submission_v7.py) as a single file, or use the pack script below to produce `dist/main.py` + `dist/submission.tar.gz`.
-- **Stable baseline:** [`submission_v6.py`](../submission_v6.py) (rename to `main.py` if the competition requires that exact name).
-- **Optional bundle:** use [`kaggle_submit_entry.py`](../kaggle_submit_entry.py) as `main.py` in a tarball that also includes `submission_v6.py` at the same root.
+- **Default (current):** submit [`submission_v19.py`](../submission_v19.py) as a single file, or use the pack script below. Optional re-export: [`kaggle_submit_entry.py`](../kaggle_submit_entry.py).
 
-**One-shot pack:** from repo root, `./scripts/package_submission.sh` (defaults to v7). Examples: `./scripts/package_submission.sh submission_v8.py`, `./scripts/package_submission.sh submission_v6.py`. Outputs `dist/main.py`, runs `py_compile`, and `dist/submission.tar.gz` containing only `main.py`.
+- **Older versions (archived):** [`archive/legacy/submissions/`](../archive/legacy/submissions/) — e.g. v6–v18, `submission.py`. Resolve paths in scripts with [`submission_resolve.py`](../submission_resolve.py).
+
+- **Examples of archived baselines:**
+  - Planet Wars–style scaffold: `archive/legacy/submissions/submission_v8.py` — compare locally with `scripts/eval_compare_v6_v7.py` (pass explicit paths or extend scripts to use `resolve_submission_path`).
+  - Stable heuristic lineage: `submission_v6.py` … `submission_v7.py` under `archive/legacy/submissions/`.
+
+**One-shot pack:** from `kaggle/`, `./scripts/package_submission.sh` (defaults to `submission_v19.py`). Examples: `./scripts/package_submission.sh archive/legacy/submissions/submission_v8.py`. Outputs `dist/main.py`, runs `py_compile`, and `dist/submission.tar.gz` containing only `main.py`.
 
 **Local A/B:** `python3 scripts/eval_compare_v6_v7.py --seeds 0 1 2`
 

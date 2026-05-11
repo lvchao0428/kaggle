@@ -2,6 +2,11 @@
 
 Conquer planets rotating around a sun in continuous 2D space. A real-time strategy game for 2 or 4 players.
 
+## This repository (bot)
+
+- **Current default bot:** `submission_v19.py` (+ `submission_v19_regional.py`). Version history and one-line changelog: **[VERSIONS.md](../VERSIONS.md)** at the repo root.
+- **Older submissions and agent notes:** `archive/legacy/submissions/`, `archive/legacy/docs/` — see `archive/legacy/README.md`.
+
 ## Overview
 
 Players start with a single home planet and compete to control the map by sending fleets to capture neutral and enemy planets. The board is a 100x100 continuous space with a sun at the center. Planets orbit the sun, comets fly through on elliptical trajectories, and fleets travel in straight lines. The game lasts 500 turns. The player with the most total ships (on planets + in fleets) at the end wins.

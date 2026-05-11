@@ -109,14 +109,14 @@ flowchart TB
 | 可把订单排到未来 turn | 每回合仅当周发射列表 |
 | 固定邻接 `neighbours` | 需几何邻域 / 区域图等（如 v19 区域模块是独立实验层） |
 
-在 **`submission_v13.py`** 一类基线里，与 PW **概念对应**的常见落点包括：`Snapshot.surplus`/`reserve`、`target_score` 的 snipe 与 horizon 截断、`PhasePolicy.tempo_floor` + `score_plan_actions`、宽松版 `is_safe_investment`。全量 **cumulative-surplus 时间向量** 与 Lisp 级 `safety-margin` 未按原样移植（成本与数据结构差异大），见 [AGENTS.md](../AGENTS.md) 中 v11 小节。
+在 **`submission_v13.py`**（现位于 `../archive/legacy/submissions/`）一类基线里，与 PW **概念对应**的常见落点包括：`Snapshot.surplus`/`reserve`、`target_score` 的 snipe 与 horizon 截断、`PhasePolicy.tempo_floor` + `score_plan_actions`、宽松版 `is_safe_investment`。全量 **cumulative-surplus 时间向量** 与 Lisp 级 `safety-margin` 未按原样移植（成本与数据结构差异大），见 [AGENTS.md](../archive/legacy/docs/AGENTS.md) 中 v11 小节。
 
 ---
 
 ## 4. 若将 PW 思想实验进 Orbit Wars 提交
 
 - **应用前请用 `scripts/eval_head2head.py` 对固定 seed 回归**；PW 启发式在 **v19 等区域实验分支**上若未经验证不要随意合并。
-- 更稳妥的试验入口是以 **`submission_v13.py`（或你当前认定的主提交）** 为母本复制新版文件改参。
+- 更稳妥的试验入口是以 **`archive/legacy/submissions/submission_v13.py`（或你当前认定的主提交）** 为母本复制新版文件改参。
 
 ---
 

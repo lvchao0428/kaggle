@@ -23,7 +23,7 @@ Browse for: **resource routing**, **factory/robot allocation**, **risk/reward sc
 | Lux idea | Orbit Wars hook |
 |----------|------------------|
 | Macro “where to invest next” | `allocation/scoring.py` — planet value, threat, ETA |
-| Unit assignment under cap | `GameState` + multi-source sends in `submission_v6.py` |
+| Unit assignment under cap | `GameState` + multi-source sends in `archive/legacy/submissions/submission_v6.py` |
 | Rollout / limited-depth search | `simulation/forward.py` |
 | RL for policy | `orbit_wars_bot/rl/` — start with **macro parameters** or **discrete src×dst on top-K** |
 

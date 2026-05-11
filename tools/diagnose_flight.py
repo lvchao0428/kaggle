@@ -14,7 +14,7 @@ from pathlib import Path
 # Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from kaggle.submission_v19 import (
+from submission_v19 import (
     GameState, fleet_speed, point_segment_distance, segment_hits_sun,
     SUN_X, SUN_Y, SUN_RADIUS, BOARD
 )

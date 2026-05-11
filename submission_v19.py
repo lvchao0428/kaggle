@@ -88,6 +88,28 @@ def segment_hits_sun(ax, ay, bx, by, margin: float = 1.25) -> bool:
     return point_segment_distance(SUN_X, SUN_Y, ax, ay, bx, by) < SUN_RADIUS + margin
 
 
+def swept_pair_hit(
+    ax: float, ay: float, bx: float, by: float,
+    p0x: float, p0y: float, p1x: float, p1y: float, r: float,
+) -> bool:
+    """True iff segment A->B and segment P0->P1 come within r (orbit_wars.py)."""
+    d0x, d0y = ax - p0x, ay - p0y
+    dvx = (bx - ax) - (p1x - p0x)
+    dvy = (by - ay) - (p1y - p0y)
+    a = dvx * dvx + dvy * dvy
+    b = 2.0 * (d0x * dvx + d0y * dvy)
+    c = d0x * d0x + d0y * d0y - r * r
+    if a < 1e-12:
+        return c <= 0.0
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return False
+    sq = math.sqrt(disc)
+    t1 = (-b - sq) / (2.0 * a)
+    t2 = (-b + sq) / (2.0 * a)
+    return t2 >= 0.0 and t1 <= 1.0
+
+
 # ╔═══ region 1: data classes ═══════════════════════════════════════════════╗
 
 class Planet:
@@ -234,6 +256,40 @@ class GameState:
         a1 = a0 + self.ang_vel * (self.step + int(t))
         return SUN_X + r * math.cos(a1), SUN_Y + r * math.sin(a1)
 
+    def planet_motion_segment(self, p: Planet, k: int) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """(old_pos, new_pos) for planet ``p`` during fleet's k-th move (k>=1), per orbit_wars."""
+        if p.is_comet and p.id in self.comet_paths:
+            path, idx = self.comet_paths[p.id]
+            if k == 1:
+                p_old = (p.x, p.y)
+                if idx + 1 >= len(path):
+                    p_new = p_old
+                else:
+                    p_new = (float(path[idx + 1][0]), float(path[idx + 1][1]))
+                return p_old, p_new
+            j0 = min(idx + k - 1, len(path) - 1)
+            j1 = min(idx + k, len(path) - 1)
+            return ((float(path[j0][0]), float(path[j0][1])),
+                    (float(path[j1][0]), float(path[j1][1])))
+        if not self.is_orbiting(p):
+            xy = (p.x, p.y)
+            return xy, xy
+        if k == 1:
+            p_old = (p.x, p.y)
+            r = math.hypot(p.initial_x - SUN_X, p.initial_y - SUN_Y)
+            a0 = math.atan2(p.initial_y - SUN_Y, p.initial_x - SUN_X)
+            a1 = a0 + self.ang_vel * self.step
+            p_new = (SUN_X + r * math.cos(a1), SUN_Y + r * math.sin(a1))
+            return p_old, p_new
+        r = math.hypot(p.initial_x - SUN_X, p.initial_y - SUN_Y)
+        a0 = math.atan2(p.initial_y - SUN_Y, p.initial_x - SUN_X)
+        old_i = self.step + k - 2
+        new_i = self.step + k - 1
+        a_old = a0 + self.ang_vel * old_i
+        a_new = a0 + self.ang_vel * new_i
+        return ((SUN_X + r * math.cos(a_old), SUN_Y + r * math.sin(a_old)),
+                (SUN_X + r * math.cos(a_new), SUN_Y + r * math.sin(a_new)))
+
     def comet_turns_left(self, p: Planet) -> int:
         if not p.is_comet or p.id not in self.comet_paths:
             return 999
@@ -352,36 +408,106 @@ def _ray_safe(sx: float, sy: float, angle: float, spd: float, min_flight: int = 
     return True
 
 
-def safe_aim(state: GameState, src: Planet, dst: Planet, ships: int) -> Tuple[float, int]:
-    """Return (angle, eta). Guarantees the entire flight ray never hits the sun.
+LAUNCH_SIM_MAX_STEPS = 220
+# Must match kaggle_environments/envs/orbit_wars/orbit_wars.py fleet spawn.
+ENGINE_LAUNCH_PAD = 0.1
 
-    核心：舰队发射后一直飞到撞到星球或飞出棋盘。
-    所以必须检查从发射点沿该角度的**整条射线**，不只是到 eta。
+
+def launch_origin(src: Planet, angle: float) -> Tuple[float, float]:
+    """Point just outside `src`'s disk on the launch bearing (engine uses radius+0.1)."""
+    r = float(src.radius) + ENGINE_LAUNCH_PAD
+    return src.x + math.cos(angle) * r, src.y + math.sin(angle) * r
+
+
+def launch_hits_target_first(
+    state: GameState,
+    src_x: float,
+    src_y: float,
+    angle: float,
+    ships: int,
+    target_id: int,
+    max_steps: int = LAUNCH_SIM_MAX_STEPS,
+    ignore_planet_id: Optional[int] = None,
+) -> bool:
+    """True iff the first planetary contact (orbit_wars swept collision order) is target_id.
+
+    Uses the same relative-motion segment test as the official environment, not
+    a frozen planet at integer steps.
     """
-    spd = fleet_speed(max(1, ships), state.max_speed)
-    tx, ty, eta = lead_intercept(state, src, dst, max(1, ships))
+    spd = fleet_speed(max(1, int(ships)), state.max_speed)
+    cx, cy = float(src_x), float(src_y)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    for k in range(1, max_steps + 1):
+        fx0, fy0 = cx, cy
+        fx1, fy1 = cx + cos_a * spd, cy + sin_a * spd
+        hit_id: Optional[int] = None
+        for p in state.planets:
+            if ignore_planet_id is not None and p.id == ignore_planet_id:
+                continue
+            p0, p1 = state.planet_motion_segment(p, k)
+            if p0[0] < 0:
+                continue
+            if swept_pair_hit(fx0, fy0, fx1, fy1,
+                              p0[0], p0[1], p1[0], p1[1], p.radius):
+                hit_id = p.id
+                break
+        if hit_id is not None:
+            return hit_id == target_id
+        if not (0.0 <= fx1 <= BOARD and 0.0 <= fy1 <= BOARD):
+            return False
+        if point_segment_distance(SUN_X, SUN_Y, fx0, fy0, fx1, fy1) < SUN_RADIUS:
+            return False
+        cx, cy = fx1, fy1
+    return False
+
+
+def safe_aim(state: GameState, src: Planet, dst: Planet, ships: int) -> Tuple[float, int]:
+    """Return (angle, eta). Prefers angles that actually intercept `dst` from rim spawn.
+
+    Among candidates that pass coarse `_ray_safe` from planet center, pick the
+    first whose stepped trajectory (from `launch_origin`) hits `dst` before OOB
+    or sun. Falls back to legacy first-_ray_safe-only behavior if none qualify
+    so callers can still attempt emit (final gate in `_emit`).
+    """
+    nships = max(1, int(ships))
+    spd = fleet_speed(nships, state.max_speed)
+    tx, ty, eta = lead_intercept(state, src, dst, nships)
     tx = max(1.0, min(BOARD - 1.0, tx))
     ty = max(1.0, min(BOARD - 1.0, ty))
     angle0 = math.atan2(ty - src.y, tx - src.x)
+    tid = dst.id
 
-    # 1. 直接瞄准——整条射线不穿日，且 eta 步内不出界
-    if _ray_safe(src.x, src.y, angle0, spd, min_flight=eta):
-        return angle0, eta
+    def _qualifies(a: float) -> bool:
+        if not _ray_safe(src.x, src.y, a, spd, min_flight=eta):
+            return False
+        lx, ly = launch_origin(src, a)
+        return launch_hits_target_first(
+            state, lx, ly, a, nships, tid,
+            max_steps=LAUNCH_SIM_MAX_STEPS, ignore_planet_id=None)
 
-    # 2. 偏角搜索
+    candidates: List[float] = [angle0]
     for delta in (0.15, -0.15, 0.30, -0.30, 0.50, -0.50, 0.75, -0.75,
                   1.05, -1.05, 1.40, -1.40, 1.80, -1.80, 2.20, -2.20,
-                  2.60, -2.60, 3.00, -3.00):
-        a = angle0 + delta
-        if _ray_safe(src.x, src.y, a, spd, min_flight=eta):
+                  2.60, -2.60, 3.00, -3.00, 3.14, -3.14):
+        candidates.append(angle0 + delta)
+
+    for a in candidates:
+        if _qualifies(a):
             return a, eta
 
-    # 3. 兜底：朝最远角落（至少不撞日）
     safe_corners = [(2.0, 2.0), (2.0, 98.0), (98.0, 2.0), (98.0, 98.0)]
     corner = max(safe_corners, key=lambda c: math.hypot(c[0] - src.x, c[1] - src.y))
     ca = math.atan2(corner[1] - src.y, corner[0] - src.x)
-    return ca, eta
+    if _qualifies(ca):
+        return ca, eta
 
+    # Legacy fallback (may fail `_emit`'s trajectory gate).
+    for a in candidates:
+        if _ray_safe(src.x, src.y, a, spd, min_flight=eta):
+            return a, eta
+    if _ray_safe(src.x, src.y, ca, spd, min_flight=eta):
+        return ca, eta
 def target_state_at(state: GameState, dst: Planet, eta: int) -> Tuple[int, int]:
     """Project (owner, ships) of `dst` after `eta` turns including in-flight arrivals."""
     owner = dst.owner
@@ -1799,29 +1925,35 @@ class PlanArbiter:
             cap = max(0, src.ships - ABS_MIN_BATCH - snap.used.get(sid, 0))
         else:
             cap = snap.avail(sid)
-        send = min(int(ships), cap)
-        if send < ABS_MIN_BATCH:
+        send_cap = min(int(ships), cap)
+        if send_cap < ABS_MIN_BATCH:
             return False
 
-        angle, eta = safe_aim(state, src, dst, send)
+        retry_sends: List[int] = [send_cap]
+        for delta in (-8, 8, -16, 16, -4, 12):
+            s2 = send_cap + delta
+            if s2 >= ABS_MIN_BATCH and s2 <= cap and s2 not in retry_sends:
+                retry_sends.append(s2)
 
-        # 最终安全门：射线不穿日 + eta 步内不出界
-        spd = fleet_speed(send, state.max_speed)
-        if not _ray_safe(src.x, src.y, angle, spd, min_flight=eta):
-            return False
-
-        # 方向偏差检查：如果 safe_aim 返回的角度与直线方向偏差 > 90°，
-        # 说明完全偏离了目标，拒绝发射
         direct_angle = math.atan2(dst.y - src.y, dst.x - src.x)
-        angle_diff = abs(angle - direct_angle)
-        if angle_diff > math.pi:
-            angle_diff = 2 * math.pi - angle_diff
-        if angle_diff > 1.2:  # ~69°，合理偏角上限
-            return False
-
-        self.moves.append([sid, float(angle), int(send)])
-        snap.subtract(sid, send)
-        return True
+        for send in retry_sends:
+            angle, eta = safe_aim(state, src, dst, send)
+            spd = fleet_speed(send, state.max_speed)
+            if not _ray_safe(src.x, src.y, angle, spd, min_flight=eta):
+                continue
+            angle_diff = abs(angle - direct_angle)
+            if angle_diff > math.pi:
+                angle_diff = 2 * math.pi - angle_diff
+            if angle_diff > 1.2:
+                continue
+            lx, ly = launch_origin(src, angle)
+            if not launch_hits_target_first(state, lx, ly, angle, send, did,
+                                            ignore_planet_id=None):
+                continue
+            self.moves.append([sid, float(angle), int(send)])
+            snap.subtract(sid, send)
+            return True
+        return False
 
 
     def _out_of_time(self, threshold_ms: float) -> bool:

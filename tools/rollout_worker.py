@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from submission_resolve import resolve_submission_path  # noqa: E402
 from tools.rl_agent import RLAgent  # noqa: E402
 
 # How often (in game steps) to sample a shaped reward.  0 = disabled.
@@ -51,7 +52,7 @@ def load_static_agent(version: str):
     """Load submission_<version>.py and return its `agent` callable."""
     if version == "random":
         return "random"
-    path = ROOT / f"submission_{version}.py"
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"submission_{version}_rollout", path)
     if spec is None or spec.loader is None:
         raise ImportError(str(path))

@@ -12,10 +12,10 @@ Usage::
     python3.12 tools/aim_trainer.py --version v17 --games 10 --seeds 0-9
     python3.12 tools/aim_trainer.py --version v18 --games 10 --seeds 0-9
 
-The script hooks into the game loop and checks every fleet's trajectory after
-the agent produces moves. It does NOT modify the bot -- it's a diagnostic tool
-that tells you the empirical OOB and sun-hit rates so you can tune safe_aim
-parameters with data instead of guessing.
+Trajectory checks (when the loaded submission exposes ``swept_pair_hit`` and
+``GameState.planet_motion_segment``) mirror ``orbit_wars.py``: swept segment
+collision vs moving planets, ``launch_origin`` at ``radius + 0.1``, up to 220
+steps per fleet.
 """
 
 from __future__ import annotations
@@ -32,10 +32,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-SUN_X = SUN_Y = 50.0
-SUN_RADIUS = 10.0
-BOARD = 100.0
-
 
 def _parse_seeds(raw: str) -> List[int]:
     seeds: List[int] = []
@@ -48,73 +44,80 @@ def _parse_seeds(raw: str) -> List[int]:
     return seeds
 
 
-def point_segment_distance(px, py, ax, ay, bx, by) -> float:
-    abx, aby = bx - ax, by - ay
-    l2 = abx * abx + aby * aby
-    if l2 <= 1e-9:
-        return math.hypot(px - ax, py - ay)
-    t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / l2))
-    proj_x = ax + t * abx
-    proj_y = ay + t * aby
-    return math.hypot(px - proj_x, py - proj_y)
+from submission_resolve import resolve_submission_path
 
 
-def fleet_speed(ships: int, max_speed: float = 6.0) -> float:
-    if ships <= 1:
-        return 1.0
-    spd = 1.0 + (max_speed - 1.0) * (math.log(max(1, ships)) / math.log(1000)) ** 1.5
-    return min(spd, max_speed)
-
-
-def load_agent(version: str):
-    path = ROOT / f"submission_{version}.py"
+def load_submission(version: str):
+    """Load submission module (GameState, geometry, agent, …)."""
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"submission_{version}_aim", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"submission_{version}_aim"] = mod
     spec.loader.exec_module(mod)
-    return mod.agent
+    return mod
 
 
-def check_fleet_safety(src_x: float, src_y: float, angle: float,
-                       ships: int, max_speed: float = 6.0,
-                       all_planet_positions: List[Tuple[float, float]] = None,
-                       ) -> Dict[str, bool]:
-    """Check if a fleet's trajectory is safe.
-
-    A fleet is 'OOB' if it exits the board BEFORE reaching any planet
-    (within 2 units capture radius). Sun-hit if the flight segment
-    passes within SUN_RADIUS of the sun center.
-    """
-    spd = fleet_speed(ships, max_speed)
-    results = {"oob": False, "sun_hit": False}
-
-    # Step along the trajectory and check for OOB/sun/planet arrival.
-    for eta in range(1, 80):
-        fx = src_x + math.cos(angle) * spd * eta
-        fy = src_y + math.sin(angle) * spd * eta
-
-        # Check if fleet reached any planet (capture radius ~2 units).
-        if all_planet_positions:
-            for px, py in all_planet_positions:
-                if math.hypot(fx - px, fy - py) < 3.0:
-                    return results  # arrived at planet, safe
-
-        if fx < 0 or fx > BOARD or fy < 0 or fy > BOARD:
-            results["oob"] = True
-            return results
-
-        # Sun collision along segment from src to current position.
-        seg_dist = point_segment_distance(SUN_X, SUN_Y, src_x, src_y, fx, fy)
-        if seg_dist < SUN_RADIUS:
-            results["sun_hit"] = True
-            return results
-
-    return results
+def load_agent(version: str):
+    return load_submission(version).agent
 
 
-def run_one_game(agent_fn, seed: int) -> Dict:
+def trajectory_oob_before_planet(
+    mod,
+    state,
+    lx: float,
+    ly: float,
+    angle: float,
+    ships: int,
+    max_steps: int = 220,
+) -> Tuple[bool, bool]:
+    """OOB or sun before any planet (engine order: planets, bounds, sun)."""
+    spd = mod.fleet_speed(int(ships), state.max_speed)
+    cx, cy = lx, ly
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    if hasattr(state, "planet_motion_segment") and hasattr(mod, "swept_pair_hit"):
+        for k in range(1, max_steps + 1):
+            fx0, fy0 = cx, cy
+            fx1, fy1 = cx + cos_a * spd, cy + sin_a * spd
+            for p in state.planets:
+                p0, p1 = state.planet_motion_segment(p, k)
+                if p0[0] < 0:
+                    continue
+                if mod.swept_pair_hit(
+                    fx0, fy0, fx1, fy1,
+                    p0[0], p0[1], p1[0], p1[1], p.radius,
+                ):
+                    return False, False
+            if not (0.0 <= fx1 <= mod.BOARD and 0.0 <= fy1 <= mod.BOARD):
+                return True, False
+            if mod.point_segment_distance(
+                mod.SUN_X, mod.SUN_Y, fx0, fy0, fx1, fy1
+            ) < mod.SUN_RADIUS:
+                return False, True
+            cx, cy = fx1, fy1
+        return False, False
+
+    for t in range(1, max_steps + 1):
+        nx = cx + cos_a * spd
+        ny = cy + sin_a * spd
+        if nx < 0 or nx > mod.BOARD or ny < 0 or ny > mod.BOARD:
+            return True, False
+        if mod.point_segment_distance(
+            mod.SUN_X, mod.SUN_Y, cx, cy, nx, ny
+        ) < mod.SUN_RADIUS:
+            return False, True
+        for p in state.planets:
+            px, py = state.planet_pos_at(p, t)
+            if mod.point_segment_distance(px, py, cx, cy, nx, ny) < p.radius:
+                return False, False
+        cx, cy = nx, ny
+    return False, False
+
+
+def run_one_game(agent_fn, seed: int, mod) -> Dict:
     """Run one game and check every fleet launched for safety."""
     from kaggle_environments import make
 
@@ -124,7 +127,6 @@ def run_one_game(agent_fn, seed: int) -> Dict:
     total_fleets = 0
     oob_fleets = 0
     sun_hit_fleets = 0
-    max_speed = 6.0
 
     steps_run = 0
     while not env.done:
@@ -138,14 +140,6 @@ def run_one_game(agent_fn, seed: int) -> Dict:
         except (KeyError, IndexError, TypeError):
             break
 
-        # Get max_speed from config
-        try:
-            config = env.configuration
-            if hasattr(config, "max_ship_speed"):
-                max_speed = config.max_ship_speed
-        except Exception:
-            pass
-
         # Run agent
         try:
             actions = agent_fn(player_obs, env.configuration)
@@ -153,32 +147,32 @@ def run_one_game(agent_fn, seed: int) -> Dict:
             actions = []
 
         if actions:
-            # Find source planet positions.
-            # Planet format: [id, owner, x, y, radius, ships, production]
-            planets = {}
-            all_positions = []
-            raw_planets = player_obs.get("planets", [])
-            for p in raw_planets:
-                if isinstance(p, (list, tuple)) and len(p) >= 4:
-                    planets[p[0]] = (p[2], p[3])
-                    all_positions.append((p[2], p[3]))
-                elif isinstance(p, dict):
-                    planets[p.get("id", -1)] = (p.get("x", 50.0), p.get("y", 50.0))
-                    all_positions.append((p.get("x", 50.0), p.get("y", 50.0)))
+            try:
+                state = mod.GameState(player_obs, env.configuration)
+            except Exception:
+                state = None
+            pm = {p.id: p for p in state.planets} if state is not None else {}
 
             for move in actions:
                 if len(move) >= 3:
-                    src_id = move[0]
-                    angle = move[1]
-                    ships = move[2]
-                    sx, sy = planets.get(src_id, (50.0, 50.0))
-
-                    result = check_fleet_safety(
-                        sx, sy, angle, ships, max_speed, all_positions)
+                    src_id = int(move[0])
+                    angle = float(move[1])
+                    ships = int(move[2])
                     total_fleets += 1
-                    if result["oob"]:
+                    if state is None or src_id not in pm:
+                        continue
+                    src_p = pm[src_id]
+                    if hasattr(mod, "launch_origin"):
+                        lx, ly = mod.launch_origin(src_p, angle)
+                    else:
+                        r = float(src_p.radius) + 0.1
+                        lx = src_p.x + math.cos(angle) * r
+                        ly = src_p.y + math.sin(angle) * r
+                    oob, sun_hit = trajectory_oob_before_planet(
+                        mod, state, lx, ly, angle, ships)
+                    if oob:
                         oob_fleets += 1
-                    if result["sun_hit"]:
+                    if sun_hit:
                         sun_hit_fleets += 1
 
         # Step with actions for player 0, random for player 1
@@ -216,7 +210,8 @@ def main():
     args = parser.parse_args()
 
     seeds = _parse_seeds(args.seeds)[:args.games]
-    agent_fn = load_agent(args.version)
+    mod = load_submission(args.version)
+    agent_fn = mod.agent
 
     print(f"Aim accuracy test: {args.version}  games={len(seeds)}")
     print("-" * 70)
@@ -225,7 +220,7 @@ def main():
     t0 = time.time()
 
     for seed in seeds:
-        result = run_one_game(agent_fn, seed)
+        result = run_one_game(agent_fn, seed, mod)
         totals["fleets"] += result["total_fleets"]
         totals["oob"] += result["oob_fleets"]
         totals["sun"] += result["sun_hit_fleets"]

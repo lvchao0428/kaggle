@@ -33,12 +33,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import submission_v11 as v11  # type: ignore
 from .feature_extractor import (
     N_FEATURES,
     combined_features,
     state_features,
 )
+import submission_v11 as v11  # type: ignore  # registered by feature_extractor
 
 
 @dataclass

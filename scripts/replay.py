@@ -44,12 +44,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from submission_resolve import resolve_submission_path
+
+
 def _load_agent(version: str):
     if version == "random":
         return "random"
-    path = ROOT / f"submission_{version}.py"
-    if not path.is_file():
-        raise FileNotFoundError(f"submission_{version}.py not found in {ROOT}")
+    path = resolve_submission_path(ROOT, version)
     spec = importlib.util.spec_from_file_location(f"sub_{version}_replay", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"sub_{version}_replay"] = mod

@@ -21,7 +21,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import submission_v11 as v11  # type: ignore
+import importlib.util
+
+from submission_resolve import resolve_submission_path
+
+_spec = importlib.util.spec_from_file_location(
+    "submission_v11", resolve_submission_path(ROOT, "v11")
+)
+v11 = importlib.util.module_from_spec(_spec)
+sys.modules["submission_v11"] = v11
+assert _spec.loader is not None
+_spec.loader.exec_module(v11)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

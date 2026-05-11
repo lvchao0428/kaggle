@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from submission_resolve import resolve_submission_path
+
 
 def _load_agent(mod_name: str, file_path: Path):
     spec = importlib.util.spec_from_file_location(mod_name, file_path)
@@ -66,8 +68,8 @@ def main():
     else:
         seeds = list(range(args.seed_start, args.seed_end + 1))
 
-    v9_path = ROOT / "submission_v9.py"
-    v10_path = ROOT / "submission_v10.py"
+    v9_path = resolve_submission_path(ROOT, "v9")
+    v10_path = resolve_submission_path(ROOT, "v10")
     v9 = _load_agent("submission_v9_eval", v9_path)
     v10 = _load_agent("submission_v10_eval", v10_path)
 
