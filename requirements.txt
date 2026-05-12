@@ -1,0 +1,25 @@
+# Orbit Wars — kaggle/ 工作区依赖（建议 Python 3.12，与 Kaggle 评测环境一致）
+#
+#   cd kaggle && python3.12 -m pip install -U pip && python3.12 -m pip install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# 核心：submission_v19/v20（区域聚类）、eval_head2head、orbit_wars 复盘工具
+# ---------------------------------------------------------------------------
+kaggle-environments>=1.28.0
+numpy>=1.23
+scipy>=1.10.0
+
+# ---------------------------------------------------------------------------
+# 本地 RL 宏环境（orbit_wars_bot/rl/…）
+# ---------------------------------------------------------------------------
+gymnasium>=0.29.0
+
+# ---------------------------------------------------------------------------
+# RL 训练与数据：rollout_worker、learner、distill、imitation_pretrain
+# ---------------------------------------------------------------------------
+torch>=2.0.0
+msgpack>=1.0.0
+stable-baselines3>=2.2.0
+
+# 若只跑 submission / eval_head2head、不训 RL：可注释或删掉上表中 gymnasium、torch、
+# msgpack、stable-baselines3 四行后再安装（须保留 kaggle-environments、numpy、scipy）。

@@ -1,4 +1,0 @@
-# Local bot development + evaluation (Orbit Wars)
-kaggle-environments>=1.28.0
-numpy>=1.23
-gymnasium>=0.29.0

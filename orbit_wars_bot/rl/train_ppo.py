@@ -1,4 +1,4 @@
-"""Train a small PPO policy on macro actions (requires requirements-rl.txt)."""
+"""Train a small PPO policy on macro actions (deps: repo `requirements.txt`)."""
 
 from __future__ import annotations
 

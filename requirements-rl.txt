@@ -1,3 +1,0 @@
-# Install bot deps first: pip install -r requirements-bot.txt
-stable-baselines3>=2.2.0
-torch>=2.0.0
