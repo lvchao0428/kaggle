@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from submission_v19 import (
+from submission_v20 import (
     GameState, safe_aim, fleet_speed, point_segment_distance, segment_hits_sun,
     SUN_X, SUN_Y, SUN_RADIUS, BOARD, lead_intercept
 )

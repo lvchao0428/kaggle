@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-SRC="${1:-submission_v19.py}"
+SRC="${1:-submission_v20.py}"
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 MAIN="$OUT_DIR/main.py"
 TGZ="$OUT_DIR/submission.tar.gz"

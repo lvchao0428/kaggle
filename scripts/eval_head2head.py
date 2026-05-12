@@ -12,8 +12,8 @@ Examples::
     # v11 vs random, 10 seeds (10 games, A is player 0 only)
     python3.12 scripts/eval_head2head.py --a v11 --b random --seeds 0-9 --no-swap
 
-    # v19@profile activates ORB_STRATEGY_PROFILE wrappers (rush, turtle, ...)
-    python3.12 scripts/eval_head2head.py --a v19@rush --b v17 --seeds 0-4
+    # v20@profile activates ORB_STRATEGY_PROFILE wrappers (rush, turtle, ...)
+    python3.12 scripts/eval_head2head.py --a v20@rush --b v17 --seeds 0-4
 
     # Quick: explicit seed list, default A=v11 B=v9
     python3.12 scripts/eval_head2head.py --seeds 0 1 2 3 4
@@ -40,7 +40,7 @@ from submission_resolve import resolve_submission_path
 
 
 def _parse_version_profile(version: str):
-    """Split ``v19@rush`` into (``v19``, ``rush``); profile for ORB_STRATEGY_PROFILE."""
+    """Split ``v20@rush`` into (``v20``, ``rush``); profile for ORB_STRATEGY_PROFILE."""
     if "@" not in version:
         return version, None
     base, _, prof = version.partition("@")
@@ -52,7 +52,7 @@ def _load_agent(version: str):
     Special string "random" returns the literal string (kaggle-environments
     treats it as a built-in opponent).
 
-    Use ``v19@turtle`` etc. to activate [submission_v19](submission_v19.py)
+    Use ``v20@turtle`` etc. to activate [submission_v20](submission_v20.py)
     `_STRATEGY_PROFILE_DELTAS` during that agent's turns (ContextVar-safe).
     """
     if version == "random":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Offline smoke tests for v19 OOB / launch trajectory gate.
+"""Offline smoke tests for v20 OOB / launch trajectory gate.
 
-Run from repo ``kaggle/`` (same directory as ``submission_v19.py``):
+Run from repo ``kaggle/`` (same directory as ``submission_v20.py``):
 
   python3 tools/test_launch_trajectory_gate.py
 
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import submission_v19 as v19
+import submission_v20 as v20
 
 
 def _banner(quiet: bool, msg: str) -> None:
@@ -48,7 +48,7 @@ def _minimal_state():
         "fleets": [],
         "configuration": {"shipSpeed": 6.0, "episodeSteps": 500},
     }
-    return v19.GameState(obs, obs["configuration"])
+    return v20.GameState(obs, obs["configuration"])
 
 
 def _run_case(quiet: bool, title: str, explain: str, fn) -> None:
@@ -65,21 +65,21 @@ def test_hits_intended_target() -> None:
     st = _minimal_state()
     sx, sy = 5.0, 30.0
     ang = 0.0
-    assert v19.launch_hits_target_first(st, sx, sy, ang, 50, 1, ignore_planet_id=0)
+    assert v20.launch_hits_target_first(st, sx, sy, ang, 50, 1, ignore_planet_id=0)
 
 
 def test_wrong_target_id_fails() -> None:
     st = _minimal_state()
     sx, sy = 5.0, 30.0
     ang = 0.0
-    assert not v19.launch_hits_target_first(st, sx, sy, ang, 50, 0, ignore_planet_id=0)
+    assert not v20.launch_hits_target_first(st, sx, sy, ang, 50, 0, ignore_planet_id=0)
 
 
 def test_oob_before_any_target() -> None:
     st = _minimal_state()
     sx, sy = 5.0, 30.0
     ang = -math.pi / 2
-    assert not v19.launch_hits_target_first(st, sx, sy, ang, 20, 1, ignore_planet_id=0)
+    assert not v20.launch_hits_target_first(st, sx, sy, ang, 20, 1, ignore_planet_id=0)
 
 
 _emit_debug: tuple | None = None
@@ -88,12 +88,12 @@ _emit_debug: tuple | None = None
 def test_emit_accepts_good_launch() -> None:
     global _emit_debug
     st = _minimal_state()
-    pol = v19.PhasePolicy.for_state(st)
-    snap = v19.Snapshot.build(st, pol)
-    arb = v19.PlanArbiter(
+    pol = v20.PhasePolicy.for_state(st)
+    snap = v20.Snapshot.build(st, pol)
+    arb = v20.PlanArbiter(
         snap,
-        v19.DiplomacyEngine(st, v19._GLOBAL_OPP),
-        v19._GLOBAL_NEURAL,
+        v20.DiplomacyEngine(st, v20._GLOBAL_OPP),
+        v20._GLOBAL_NEURAL,
         elapsed_ms_fn=lambda: 0.0,
         deadline_ms=10000.0,
         regional_graph=None,
@@ -104,8 +104,8 @@ def test_emit_accepts_good_launch() -> None:
     assert len(arb.moves) == 1
     sid, angle, ships = arb.moves[0]
     assert sid == 0 and ships > 0
-    lx, ly = v19.launch_origin(st.get(0), angle)
-    assert v19.launch_hits_target_first(st, lx, ly, angle, ships, 1,
+    lx, ly = v20.launch_origin(st.get(0), angle)
+    assert v20.launch_hits_target_first(st, lx, ly, angle, ships, 1,
                                        ignore_planet_id=None)
     _emit_debug = (angle, ships, lx, ly)
 
@@ -113,7 +113,7 @@ def test_emit_accepts_good_launch() -> None:
 def main() -> None:
     global _emit_debug
     ap = argparse.ArgumentParser(
-        description="Smoke-test v19 launch / OOB gate without kaggle_environments.",
+        description="Smoke-test v20 launch / OOB gate without kaggle_environments.",
     )
     ap.add_argument(
         "-q", "--quiet",
@@ -125,14 +125,14 @@ def main() -> None:
     _emit_debug = None  # reset module-level between runs
 
     if not quiet:
-        print("test_launch_trajectory_gate — v19 launch / OOB gate smoke tests")
+        print("test_launch_trajectory_gate — v20 launch / OOB gate smoke tests")
         print("=" * 60)
         print(
-            "用途: 在**不跑 orbit_wars** 的前提下，用极简地图验证submission_v19里\n"
+            "用途: 在**不跑 orbit_wars** 的前提下，用极简地图验证submission_v20里\n"
             "  • launch_hits_target_first（swept 碰撞 + 首碰目标是否为目标星）\n"
             "  • launch_origin（引擎一致 radius+0.1）\n"
             "  • PlanArbiter._emit 最终门闩是否放行一条合法发往行星 1 的 move\n"
-            "完整对局统计请用: python3 tools/aim_trainer.py --version v19 ...\n"
+            "完整对局统计请用: python3 tools/aim_trainer.py --version v20 ...\n"
         )
 
     cases = [

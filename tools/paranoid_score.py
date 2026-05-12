@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Offline pessimistic rollout scoring (submission_v19 paranoid helpers).
+"""Offline pessimistic rollout scoring (submission_v20 paranoid helpers).
 
-Loads [submission_v19](submission_v19.py) Sim stack and exposes
+Loads [submission_v20](submission_v20.py) Sim stack and exposes
 ``score_plan_actions`` / ``score_plan_actions_paranoid`` / ``blended_paranoid_sim``.
 Use for diagnosing plan deltas without running full Kaggle episodes.
 
@@ -29,12 +29,12 @@ def main() -> int:
     if not args.check_import:
         args.check_import = True
 
-    import submission_v19 as s19  # noqa: WPS433
+    import submission_v20 as s20  # noqa: WPS433
 
-    assert hasattr(s19, "score_plan_actions_paranoid")
-    assert hasattr(s19, "blended_paranoid_sim")
+    assert hasattr(s20, "score_plan_actions_paranoid")
+    assert hasattr(s20, "blended_paranoid_sim")
 
-    gs = getattr(s19, "GameState")
+    gs = getattr(s20, "GameState")
 
     obs = {
         "player": 0,
@@ -57,11 +57,11 @@ def main() -> int:
     }
     state = gs(obs)
 
-    baseline = s19.score_plan_actions(state, [(0, 1, 20)], steps=10, tempo_floor=1)
-    b2, pessim = s19.score_plan_actions_paranoid(
+    baseline = s20.score_plan_actions(state, [(0, 1, 20)], steps=10, tempo_floor=1)
+    b2, pessim = s20.score_plan_actions_paranoid(
         state, [(0, 1, 20)], steps=10, tempo_floor=1, par_steps=10)
 
-    blended = s19.blended_paranoid_sim(
+    blended = s20.blended_paranoid_sim(
         state, [(0, 1, 20)],
         steps=10, tempo_floor=1, par_steps=10, blend=0.5)
 

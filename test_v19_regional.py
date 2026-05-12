@@ -1,4 +1,4 @@
-"""Unit and integration tests for v19 regional graph (imports single submission file)."""
+"""Unit and integration tests for regional graph (imports single submission file, v20)."""
 
 import math
 import sys
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 try:
-    from submission_v19 import (
+    from submission_v20 import (
         RegionalGraph,
         Region,
         Wave,
@@ -20,7 +20,7 @@ try:
         segment_hits_sun,
     )
 except ImportError:
-    raise ImportError("submission_v19 must export regional helpers for tests") from None
+    raise ImportError("submission_v20 must export regional helpers for tests") from None
 
 
 # Mock Planet class for testing
@@ -207,7 +207,7 @@ class TestMultiHopPlanner:
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("v19.0 Regional Graph Test Suite (single-file submission_v19)")
+    print("v20.0 Regional Graph Test Suite (single-file submission_v20)")
     print("=" * 60 + "\n")
 
     test_classes = [

@@ -10,21 +10,14 @@ from __future__ import annotations
 import base64
 import io
 import math
-import os
 import random
 import time
 from collections import defaultdict
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from scipy.cluster.hierarchy import fclusterdata
-
-# Set by eval / rollout wrappers (`v19@rush`); Kaggle never touches this.
-ORB_STRATEGY_PROFILE: ContextVar[Optional[str]] = ContextVar(
-    "ORB_STRATEGY_PROFILE", default=None
-)
 
 
 # ╔═══ region 0: constants & helpers ════════════════════════════════════════╗
@@ -866,43 +859,9 @@ class Snapshot:
 
 
 # ╔═══ region 4: PhasePolicy ════════════════════════════════════════════════╗
-#
-# ── How to iterate parameters (offline → Kaggle) ───────────────────────────
-#
-# 1) Canonical knobs live only in PHASE_TABLE below (early / mid / late).
-#    Typical groups:
-#    - Economy vs aggression: reserve_growth_mul, cost_pen_mul,
-#      cost_pen_neutral_mul, urgent_attack_ratio, mode_order.
-#    - Search cost: mcts_* , pragmatic_mcts_* , neural_modifier_strength ,
-#      sim_steps , tempo_floor.
-#    - Commit gates (were magic numbers): region_pressure_ratio,
-#      safe_surplus_ship_mult — used when regional_graph is active in
-#      PlanArbiter.commit_best; baseline_commit_margin vs idle baseline.
-#    - Pessimistic 1-enemy-rollout rerank: paranoid_score_budget_ms (early=0),
-#      paranoid_plan_top_k , paranoid_steps , paranoid_blend — see
-#      score_plan_actions_paranoid + PlanArbiter.score_with_modifiers .
-#
-# 2) Sweep without editing the table: export ORB_REGION_PRESSURE_RATIO ,
-#    ORB_SAFE_SURPLUS_SHIP_MULT , ORB_BASELINE_COMMIT_MARGIN per process ;
-#    _merged_phase_row() overlays them onto PHASE_TABLE reads. Useful with
-#    tools/sweep_commit_gates.py wrapping scripts/eval_head2head.py .
-#
-# 3) Scripted eval: scripts/eval_head2head.py --a v19 --b v17 --seeds 0-19 .
-#    Style overlays (same file, ContextVar-safe): --a v19@rush ,
-#    v19@turtle — ORB_STRATEGY_PROFILE merges _STRATEGY_PROFILE_DELTAS .
-#
-# 4) Smoked pessimistic math (no episode): python3 tools/paranoid_score.py
-#
-# 5) RL self-play opponent mix (tools/rollout_worker.py): --opponent-mix
-#    "self:0.5,v13:0.3,v19@expand:0.2" — weights normalized; tokens are load
-#    paths or ``self``.
-#
-# 6) Acceptance: prefer 20+ double-seeded games; watch step wall-time (arbiter
-#    skips paranoid when over paranoid_score_budget_ms).
-#
-# Single source of truth for phase-dependent tuning. Adjusting strategy = edit
-# one row (or overlay env/profile as above).
 
+# Single source of truth for phase-dependent tuning. Adjusting strategy = edit
+# one row.
 PHASE_TABLE: Dict[str, Dict[str, object]] = {
     "early": dict(
         reserve_growth_mul=2,
@@ -922,13 +881,6 @@ PHASE_TABLE: Dict[str, Dict[str, object]] = {
         approach_weight=1.8,
         sim_steps=8,
         tempo_floor=1,
-        region_pressure_ratio=0.72,
-        safe_surplus_ship_mult=1.55,
-        baseline_commit_margin=0.10,
-        paranoid_score_budget_ms=0,
-        paranoid_plan_top_k=4,
-        paranoid_steps=8,
-        paranoid_blend=0.0,
     ),
     "mid": dict(
         reserve_growth_mul=3,
@@ -948,13 +900,6 @@ PHASE_TABLE: Dict[str, Dict[str, object]] = {
         approach_weight=1.55,
         sim_steps=8,
         tempo_floor=2,
-        region_pressure_ratio=0.72,
-        safe_surplus_ship_mult=1.55,
-        baseline_commit_margin=0.10,
-        paranoid_score_budget_ms=40,
-        paranoid_plan_top_k=5,
-        paranoid_steps=8,
-        paranoid_blend=0.42,
     ),
     "late": dict(
         reserve_growth_mul=4,
@@ -974,97 +919,8 @@ PHASE_TABLE: Dict[str, Dict[str, object]] = {
         approach_weight=1.40,
         sim_steps=10,
         tempo_floor=1,
-        region_pressure_ratio=0.72,
-        safe_surplus_ship_mult=1.55,
-        baseline_commit_margin=0.10,
-        paranoid_score_budget_ms=62,
-        paranoid_plan_top_k=5,
-        paranoid_steps=10,
-        paranoid_blend=0.48,
     ),
 }
-
-# Optional per-profile overrides for local eval / rollouts via ORB_STRATEGY_PROFILE.
-# Naming mirrors Planet-Wars-style archetypes (Java PW bots cannot run here);
-# README lists PW ↔ profile mapping.
-_STRATEGY_PROFILE_DELTAS: Dict[str, Dict[str, object]] = {
-    "turtle": dict(
-        reserve_growth_mul_delta=+2,
-        urgent_attack_ratio_delta=+0.35,
-        cost_pen_mul_delta=+0.06,
-        cost_pen_neutral_mul_delta=+0.05,
-    ),
-    "rush": dict(
-        reserve_growth_mul_delta=-1,
-        urgent_attack_ratio_delta=-0.20,
-        cost_pen_mul_delta=-0.06,
-        mode_order_override=["aggro", "counter", "expand", "balanced", "comet"],
-    ),
-    "expand": dict(
-        cost_pen_mul_delta=-0.10,
-        cost_pen_neutral_mul_delta=-0.08,
-        mode_order_override=["expand", "balanced", "aggro", "counter", "comet"],
-    ),
-    "greedy_prod": dict(
-        urgent_attack_min_prod_delta=-1,
-        recapture_mul_delta=+0.12,
-        cost_pen_mul_delta=-0.04,
-    ),
-    "dual": dict(
-        urgent_attack_ratio_delta=+0.12,
-        mode_order_override=["expand", "aggro", "counter", "balanced", "comet"],
-    ),
-}
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        return float(default)
-
-
-def _merged_phase_row(ph: str) -> Dict[str, object]:
-    """Merge PHASE_TABLE[ph] with profile deltas and optional env gate floats.
-
-    When set in the environment, ORB_REGION_PRESSURE_RATIO,
-    ORB_SAFE_SURPLUS_SHIP_MULT, ORB_BASELINE_COMMIT_MARGIN override the row.
-    """
-    row: Dict[str, object] = dict(PHASE_TABLE[ph])
-    prof = ORB_STRATEGY_PROFILE.get(None)
-    if isinstance(prof, str) and prof.strip():
-        deltas = _STRATEGY_PROFILE_DELTAS.get(prof.strip().lower())
-        if deltas:
-            for k, dv in deltas.items():
-                if k == "mode_order_override":
-                    row["mode_order"] = list(dv)  # type: ignore[arg-type]
-                    continue
-                if k.endswith("_delta"):
-                    base_key = k[:-6]
-                    old = row.get(base_key)
-                    if old is None:
-                        continue
-                    if isinstance(old, bool):
-                        continue
-                    if isinstance(old, int):
-                        row[base_key] = int(old) + int(dv)  # type: ignore[arg-type]
-                    elif isinstance(old, float):
-                        row[base_key] = float(old) + float(dv)  # type: ignore[arg-type]
-            rgm = int(row.get("reserve_growth_mul", 2))
-            row["reserve_growth_mul"] = max(1, min(8, rgm))
-    row["region_pressure_ratio"] = _env_float(
-        "ORB_REGION_PRESSURE_RATIO", float(row.get("region_pressure_ratio", 0.72))
-    )
-    row["safe_surplus_ship_mult"] = _env_float(
-        "ORB_SAFE_SURPLUS_SHIP_MULT", float(row.get("safe_surplus_ship_mult", 1.55))
-    )
-    row["baseline_commit_margin"] = _env_float(
-        "ORB_BASELINE_COMMIT_MARGIN", float(row.get("baseline_commit_margin", 0.10))
-    )
-    return row
 
 
 @dataclass
@@ -1088,18 +944,11 @@ class PhasePolicy:
     approach_weight: float
     sim_steps: int
     tempo_floor: int
-    region_pressure_ratio: float
-    safe_surplus_ship_mult: float
-    baseline_commit_margin: float
-    paranoid_score_budget_ms: float
-    paranoid_plan_top_k: int
-    paranoid_steps: int
-    paranoid_blend: float
 
     @classmethod
     def for_state(cls, state: GameState) -> "PhasePolicy":
         ph = state.phase()
-        row = _merged_phase_row(ph)
+        row = PHASE_TABLE[ph]
         return cls(
             phase=ph,
             reserve_growth_mul=int(row["reserve_growth_mul"]),
@@ -1119,13 +968,6 @@ class PhasePolicy:
             approach_weight=float(row["approach_weight"]),
             sim_steps=int(row["sim_steps"]),
             tempo_floor=int(row["tempo_floor"]),
-            region_pressure_ratio=float(row["region_pressure_ratio"]),
-            safe_surplus_ship_mult=float(row["safe_surplus_ship_mult"]),
-            baseline_commit_margin=float(row["baseline_commit_margin"]),
-            paranoid_score_budget_ms=float(row["paranoid_score_budget_ms"]),
-            paranoid_plan_top_k=int(row["paranoid_plan_top_k"]),
-            paranoid_steps=int(row["paranoid_steps"]),
-            paranoid_blend=float(row["paranoid_blend"]),
         )
 
 
@@ -1423,35 +1265,6 @@ class Plan:
     urgent: bool = False  # if True, commit before scoring strategic plans
 
 
-def _prep_sim_own_launches(state: GameState, actions: List[Tuple[int, int, int]],
-                           tempo_floor: int) -> Tuple[Dict[int, SimP], List[SimF]]:
-    """Clone + apply our launches + tempo_floor idle sim (before eval window)."""
-    planets, fleets = clone_sim(state)
-    used: Dict[int, int] = defaultdict(int)
-    for sid, did, ships in actions:
-        sp = state.get(sid); dp = state.get(did); sim_src = planets.get(sid)
-        if sp is None or dp is None or sim_src is None or sim_src.owner != state.my_id:
-            continue
-        send = min(int(ships), max(0, sim_src.ships - ABS_MIN_BATCH - used[sid]))
-        if send <= 0:
-            continue
-        _, eta = safe_aim(state, sp, dp, send)
-        sim_src.ships -= send
-        used[sid] += send
-        fleets.append(SimF(state.my_id, did, send, eta))
-    for _ in range(max(0, tempo_floor - 1)):
-        sim_step(planets, fleets)
-    return planets, fleets
-
-
-def _rollout_eval(state: GameState, planets: Dict[int, SimP], fleets: List[SimF],
-                  steps: int) -> float:
-    p, f = copy_sim(planets, fleets)
-    for _ in range(steps):
-        sim_step(p, f)
-    return eval_sim_planets(state, p, f)
-
-
 def score_plan_actions(state: GameState, actions: List[Tuple[int, int, int]],
                        steps: int = 8, tempo_floor: int = 1) -> float:
     """Score by simulating `steps` turns after applying actions to a clone.
@@ -1463,169 +1276,26 @@ def score_plan_actions(state: GameState, actions: List[Tuple[int, int, int]],
     within the eval window without those follow-ups. tempo_floor=1 means
     evaluate as-is.
     """
-    planets, fleets = _prep_sim_own_launches(state, actions, tempo_floor)
-    return _rollout_eval(state, planets, fleets, steps)
-
-
-def _primary_enemy_id(state: GameState) -> Optional[int]:
-    if not state.en_ids:
-        return None
-    return max(state.en_ids, key=lambda e: state.total_ships(e))
-
-
-def _try_append_enemy_fleet(
-    state: GameState,
-    planets: Dict[int, SimP],
-    fleets: List[SimF],
-    enemy_id: int,
-    src_id: int,
-    dst_id: int,
-    want_ships: int,
-) -> bool:
-    sp = planets.get(src_id)
-    dp = planets.get(dst_id)
-    geo_s = state.get(src_id)
-    geo_d = state.get(dst_id)
-    if sp is None or dp is None or geo_s is None or geo_d is None:
-        return False
-    if sp.owner != enemy_id:
-        return False
-    max_send = max(0, sp.ships - ABS_MIN_BATCH)
-    send = min(max(int(want_ships), ABS_MIN_BATCH), max_send)
-    if send < ABS_MIN_BATCH:
-        return False
-    _, eta = safe_aim(state, geo_s, geo_d, send)
-    sp.ships -= send
-    fleets.append(SimF(enemy_id, dst_id, send, eta))
-    return True
-
-
-def _inject_paranoid_profile(
-    state: GameState,
-    planets: Dict[int, SimP],
-    fleets: List[SimF],
-    enemy_id: int,
-    profile_key: str,
-) -> None:
-    """Mutate planets/fleets with one pessimistic opponent launch."""
-    mi = state.my_id
-    enemy_pids = [pid for pid, sp in planets.items()
-                  if sp.owner == enemy_id and sp.ships >= ABS_MIN_BATCH * 2]
-    my_pids = [pid for pid, sp in planets.items() if sp.owner == mi]
-    neu_pids = [pid for pid, sp in planets.items() if sp.owner == -1]
-    cx, cy = state.centroid()
-
-    want = ABS_MIN_BATCH * 8
-
-    if profile_key == "nearest_my":
-        best = None
-        for eid in enemy_pids:
-            ge = state.get(eid)
-            if ge is None:
-                continue
-            for mid in my_pids:
-                gm = state.get(mid)
-                if gm is None:
-                    continue
-                d = ge.dist(gm)
-                if best is None or d < best[0]:
-                    best = (d, eid, mid)
-        if best:
-            _, eid, mid = best
-            _try_append_enemy_fleet(state, planets, fleets, enemy_id, eid, mid,
-                                    want)
-
-    elif profile_key == "contest_neutral" and neu_pids:
-        neu_pids_sorted = sorted(
-            neu_pids,
-            key=lambda nid: math.hypot(state.get(nid).x - cx, state.get(nid).y - cy)
-            if state.get(nid) else 999)
-        tgt = None
-        for nid in neu_pids_sorted[:6]:
-            gn = state.get(nid)
-            if gn is None:
-                continue
-            best_ep = None
-            for eid in enemy_pids:
-                ge = state.get(eid)
-                if ge is None:
-                    continue
-                d = ge.dist(gn)
-                if best_ep is None or d < best_ep[0]:
-                    best_ep = (d, eid)
-            if best_ep:
-                tgt = (best_ep[1], nid)
-                break
-        if tgt:
-            _try_append_enemy_fleet(state, planets, fleets, enemy_id, tgt[0], tgt[1],
-                                    want)
-
-    elif profile_key == "strike_high_prod_my" and my_pids:
-        mid = max(my_pids, key=lambda pid: state.get(pid).production
-                   if state.get(pid) else 0)
-        gm = state.get(mid)
-        if gm is None:
-            return
-        best_ep = None
-        for eid in enemy_pids:
-            ge = state.get(eid)
-            if ge is None:
-                continue
-            d = ge.dist(gm)
-            if best_ep is None or d < best_ep[0]:
-                best_ep = (d, eid)
-        if best_ep:
-            _try_append_enemy_fleet(state, planets, fleets, enemy_id,
-                                    best_ep[1], mid,
-                                    max(want, ABS_MIN_BATCH * 12))
-
-
-def score_plan_actions_paranoid(
-    state: GameState,
-    actions: List[Tuple[int, int, int]],
-    steps: int,
-    tempo_floor: int,
-    par_steps: Optional[int] = None,
-) -> Tuple[float, float]:
-    """Return ``(baseline_sim, pessimistic_sim)``
-
-    Baseline ignores fresh opponent fleets; pessimistic inserts up to three
-    single-launch pessimistic envelopes from the strongest enemy, then takes
-    the worst ``eval_sim_planets`` among them (and the no-injection path).
-    """
-    if par_steps is None:
-        par_steps = steps
-    eid = _primary_enemy_id(state)
-    planets0, fleets0 = _prep_sim_own_launches(state, actions, tempo_floor)
-
-    baseline = _rollout_eval(state, planets0, fleets0, steps)
-    if eid is None:
-        return baseline, baseline
-
-    worst = baseline
-    for key in ("nearest_my", "contest_neutral", "strike_high_prod_my"):
-        p, f = copy_sim(planets0, fleets0)
-        _inject_paranoid_profile(state, p, f, eid, key)
-        worst = min(worst, _rollout_eval(state, p, f, par_steps))
-
-    return baseline, worst
-
-
-def blended_paranoid_sim(
-    state: GameState,
-    actions: List[Tuple[int, int, int]],
-    *,
-    steps: int,
-    tempo_floor: int,
-    par_steps: int,
-    blend: float,
-) -> float:
-    """``base + blend * (pessimistic - base)`` for arbiter blending."""
-    b, pe = score_plan_actions_paranoid(state, actions, steps, tempo_floor,
-                                        par_steps=par_steps)
-    if blend <= 1e-9:
-        return b
-    return b + blend * (pe - b)
+    planets, fleets = clone_sim(state)
+    used: Dict[int, int] = defaultdict(int)
+    for sid, did, ships in actions:
+        sp = state.get(sid); dp = state.get(did); sim_src = planets.get(sid)
+        if sp is None or dp is None or sim_src is None or sim_src.owner != state.my_id:
+            continue
+        # Re-derive surplus from sim state (Snapshot may have evolved already).
+        send = min(int(ships), max(0, sim_src.ships - ABS_MIN_BATCH - used[sid]))
+        if send <= 0:
+            continue
+        _, eta = safe_aim(state, sp, dp, send)
+        sim_src.ships -= send
+        used[sid] += send
+        fleets.append(SimF(state.my_id, did, send, eta))
+    # Bocsimacko tempo-floor: extra idle sim steps before scoring window.
+    for _ in range(max(0, tempo_floor - 1)):
+        sim_step(planets, fleets)
+    for _ in range(steps):
+        sim_step(planets, fleets)
+    return eval_sim_planets(state, planets, fleets)
 
 
 # ── DefensePlanner ───────────────────────────────────────────────────────────
@@ -2513,41 +2183,16 @@ class PlanArbiter:
         if not plans:
             return []
 
-        # 1. Base sim scores (cheap).
+        # 1. Base sim score.
         sim_steps = self.policy.sim_steps
-        base_rows: List[List] = []
-        st = self.snap.state
+        base = []
         for plan in plans:
-            sim_b = score_plan_actions(st, plan.actions,
-                                      steps=sim_steps,
-                                      tempo_floor=self.policy.tempo_floor)
-            base_rows.append([plan.score + sim_b, plan, sim_b])
+            sim_val = score_plan_actions(self.snap.state, plan.actions,
+                                          steps=sim_steps,
+                                          tempo_floor=self.policy.tempo_floor)
+            base.append((plan.score + sim_val, plan))
 
-        base_rows.sort(key=lambda r: -r[0])
-
-        # 1b. Optional pessimistic 1-enemy-rollout refinement (timed budget).
-        if (
-            self.policy.paranoid_score_budget_ms >= 18.0
-            and self.policy.paranoid_blend > 1e-6
-        ):
-            t0_par = self.elapsed_ms()
-            lim = max(1, min(self.policy.paranoid_plan_top_k, len(base_rows)))
-            pb = float(self.policy.paranoid_score_budget_ms)
-            blend = float(self.policy.paranoid_blend)
-            psteps = max(4, min(self.policy.paranoid_steps, sim_steps + 8))
-            for i in range(lim):
-                if self.elapsed_ms() - t0_par >= pb:
-                    break
-                s_tot, plan, sim_b = base_rows[i]
-                _, pessim = score_plan_actions_paranoid(
-                    st, plan.actions, sim_steps,
-                    tempo_floor=self.policy.tempo_floor,
-                    par_steps=psteps)
-                adj = sim_b + blend * (pessim - sim_b)
-                base_rows[i][0] = plan.score + adj
-            base_rows.sort(key=lambda r: -r[0])
-
-        base: List[Tuple[float, Plan]] = [(r[0], r[1]) for r in base_rows]
+        base.sort(key=lambda x: -x[0])
 
         # 2. MCTS bonus on top-3.
         top_k = min(3, len(base))
@@ -2634,12 +2279,10 @@ class PlanArbiter:
             ]
             max_t = max(threats) if threats else 0.0
             my_prod = float(sum(p.production for p in self.snap.state.my_pl))
-            rp = float(self.snap.policy.region_pressure_ratio)
-            ssm = float(self.snap.policy.safe_surplus_ship_mult)
-            if max_t > my_prod * rp:
+            if max_t > my_prod * 0.72:
                 budget = self.snap.calculate_safe_surplus_v19(self.regional_graph)
                 ship_sum = sum(a[2] for a in best_plan.actions)
-                if ship_sum > int(budget * ssm) + ABS_MIN_BATCH * 4:
+                if ship_sum > int(budget * 1.55) + ABS_MIN_BATCH * 4:
                     return
 
         # Early phase: always commit - expansion is critical.
@@ -2647,8 +2290,7 @@ class PlanArbiter:
             baseline = score_plan_actions(self.snap.state, [],
                                           steps=self.policy.sim_steps,
                                           tempo_floor=self.policy.tempo_floor)
-            margin = float(self.snap.policy.baseline_commit_margin)
-            if best_score <= baseline + margin:
+            if best_score <= baseline + 0.1:
                 return
         self._commit_plan(best_plan, urgent=False)
 

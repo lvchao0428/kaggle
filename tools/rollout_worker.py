@@ -17,7 +17,7 @@ Usage::
         --opponents v9 v10 v11
 
     python3.12 tools/rollout_worker.py --games-per-worker 20 \\
-        --opponent-mix "self:0.5,v13:0.35,v19@rush:0.15"
+        --opponent-mix "self:0.5,v13:0.35,v20@rush:0.15"
 
 If --weights is omitted, the policy is randomly initialised (still useful
 for smoke testing).
@@ -54,7 +54,7 @@ DENSE_REWARD_WEIGHT = 0.10
 def load_static_agent(version: str):
     """Load submission_<version>.py and return its ``agent``.
 
-    Supports ``v19@turtle``-style suffixes wired to submission_v19
+    Supports ``v20@turtle``-style suffixes wired to submission_v20
     ``ORB_STRATEGY_PROFILE`` (parallel safe per process).
     """
     if version.strip().lower() == "random":

@@ -2,7 +2,7 @@
 """本地诊断工具：找出撞日 / 飞出屏幕的根本原因。
 
 用法:
-  python3 tools/diagnose_flight.py --seed 0 --a v19 --b v18
+  python3 tools/diagnose_flight.py --seed 0 --a v20 --b v18
   
 输出: 每个被发射的舰队的完整轨迹，检查是否会撞日或越界。
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 # Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from submission_v19 import (
+from submission_v20 import (
     GameState, fleet_speed, point_segment_distance, segment_hits_sun,
     SUN_X, SUN_Y, SUN_RADIUS, BOARD
 )

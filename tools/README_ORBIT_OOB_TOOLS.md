@@ -1,6 +1,6 @@
 # Orbit Wars：瞄准 / OOB 辅助工具说明
 
-面向 [submission_v19.py](../submission_v19.py) 中与「飞出棋盘（OOB）」「撞日」相关的本地验证。工作目录一般为仓库内的 **`kaggle/`**（与 `submission_*.py` 同级）。
+面向 [submission_v20.py](../submission_v20.py) 中与「飞出棋盘（OOB）」「撞日」相关的本地验证。工作目录一般为仓库内的 **`kaggle/`**（与 `submission_*.py` 同级）。
 
 ---
 
@@ -68,6 +68,6 @@ python3 tools/test_launch_trajectory_gate.py
 
 | 文件 | 说明 |
 |------|------|
-| [submission_v19.py](../submission_v19.py) | `swept_pair_hit`、`planet_motion_segment`、`launch_hits_target_first`、`ENGINE_LAUNCH_PAD` |
+| [submission_v20.py](../submission_v20.py) | `swept_pair_hit`、`planet_motion_segment`、`launch_hits_target_first`、`ENGINE_LAUNCH_PAD` |
 | [tools/aim_trainer.py](aim_trainer.py) | 对局级 OOB/sun 统计 |
 | [tools/test_launch_trajectory_gate.py](test_launch_trajectory_gate.py) | 离线单元测试 |

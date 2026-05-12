@@ -1,6 +1,8 @@
 # Orbit Wars：自对弈、评测脚本与 Kaggle 打包
 
-本文说明本仓库里与「自我对弈 / 对手池 / 调参评测」相关的操作，以及如何把 `submission_v19.py` 打成最终上传包。
+本文说明本仓库里与「自我对弈 / 对手池 / 调参评测」相关的操作，以及如何把 **`submission_v20.py`**（当前默认单文件参赛 bot）打成最终上传包。
+
+**版本关系**：**`submission_v19.py`** 保留为 **v19 基线/对照**（你当前目录中多为昨日/归档快照，用于与 v20 A/B）；**新调参、打包、随文示例默认均以 v20 为准**。Head-to-head 可随时写 `--a v20 --b v19` 做对比。
 
 ---
 
@@ -11,7 +13,7 @@
 | **规则 Bot 评测** | 两个 **静态** `submission_v*.py`（或内置 `random`）对打，算胜率 | `scripts/eval_head2head.py` |
 | **RL 自博弈（训练）** | `RLAgent`（`tools/rl_agent.py`，当前 **包装 submission_v11**）与对手（自重 / 静态 bot / 混合）对局，写 **msgpack shard** → `learner.py` 更新权重 | `tools/rollout_worker.py` + `tools/learner.py`（或 `tools/train_loop.sh`） |
 
-`submission_v19.py` 是 **单文件 Kaggle 提交**（约定见 **§8.1**）。RL 训练的 `PolicyValueNet` 目前仍挂在 **v11 的 PlanArbiter** 上；蒸馏出的 NumPy MLP **形状须与目标文件的 `NeuralVal` 一致**（常为 `14→64→32→1`），把生成的 base64 **替换**目标 `submission_vN.py` 里的 `_NEURAL_WEIGHTS_B64` 即可。要让 **v19** 吃进这套权重，需 v19 里仍有同名 `NeuralVal`接口且特征维一致——否则要自己改蒸馏脚本与接线。本文以 **v19 评测 + 打包**为主；RL 的原理与命令在 **§6**。
+`submission_v20.py` 是 **单文件 Kaggle 提交**（约定见 **§8.1**）。RL 训练的 `PolicyValueNet` 目前仍挂在 **v11 的 PlanArbiter** 上；蒸馏出的 NumPy MLP **形状须与目标文件的 `NeuralVal` 一致**（常为 `14→64→32→1`），把生成的 base64 **替换**目标 `submission_vN.py` 里的 `_NEURAL_WEIGHTS_B64` 即可。要让 **v20**（或对照用的 v19）吃进这套权重，目标文件里仍需 **同名 `NeuralVal` 接口且特征维一致**——否则要自己改蒸馏脚本与接线。本文以 **v20 评测 + 打包**为主；RL 的原理与命令在 **§6**。
 
 ---
 
@@ -19,7 +21,7 @@
 
 - **推荐解释器**：仓库约定用 Python 3.12（与 `kaggle-environments` 一致；不要用错 conda 下的 3.13 若你遇到无关的 `cabt`/`.so` 加载报错）。
 - **安装**：`python3.12 -m pip install -U "kaggle-environments>=1.28.0"`
-- **`submission_v19.py`**：依赖 **`scipy`**（`fclusterdata`），本地与 Kaggle 运行环境需能安装 scipy。
+- **`submission_v20.py`**（与同族 v19 单文件栈一致）：依赖 **`scipy`**（`fclusterdata`），本地与 Kaggle 运行环境需能安装 scipy。
 
 ---
 
@@ -28,26 +30,27 @@
 **双座位**（默认）：每个 seed 打两盘（交换先后/座位标签），减少对称图上的抽样偏置。
 
 ```bash
-# 例：v19 vs v17，种子 0–19（共 40 局）
-python3.12 scripts/eval_head2head.py --a v19 --b v17 --seeds 0-19
+# 例：v20 vs v19 或 v17，种子 0–19（共 40 局）
+python3.12 scripts/eval_head2head.py --a v20 --b v19 --seeds 0-19
+python3.12 scripts/eval_head2head.py --a v20 --b v17 --seeds 0-19
 ```
 
 **单座位**（例如对 `random`）：
 
 ```bash
-python3.12 scripts/eval_head2head.py --a v19 --b random --seeds 0-9 --no-swap
+python3.12 scripts/eval_head2head.py --a v20 --b random --seeds 0-9 --no-swap
 ```
 
-### 3.1 本地风格 profile（`v19@rush` 等）
+### 3.1 本地风格 profile（`v20@rush` 等）
 
-仅影响 **`submission_v19.py`**：通过 `ORB_STRATEGY_PROFILE`（在脚本里用 ContextVar 包住 `agent`）合并 `_STRATEGY_PROFILE_DELTAS`。Kaggle 正式提交 **不要** 带 `@`，这是本地/消融用。
+仅影响 **对应版本单文件**（如 **`submission_v20.py`**）：通过 `ORB_STRATEGY_PROFILE`（在脚本里用 ContextVar 包住 `agent`）合并 `_STRATEGY_PROFILE_DELTAS`。Kaggle 正式提交 **不要** 带 `@`，这是本地/消融用。
 
 ```bash
-python3.12 scripts/eval_head2head.py --a v19@rush --b v17 --seeds 0-9
-python3.12 scripts/eval_head2head.py --a v19@turtle --b v19 --seeds 0-9
+python3.12 scripts/eval_head2head.py --a v20@rush --b v17 --seeds 0-9
+python3.12 scripts/eval_head2head.py --a v20@turtle --b v19 --seeds 0-9
 ```
 
-profile 名：`turtle`、`rush`、`expand`、`greedy_prod`、`dual`（见 `submission_v19.py` 中 `_STRATEGY_PROFILE_DELTAS`）。
+profile 名：`turtle`、`rush`、`expand`、`greedy_prod`、`dual`（见 **`submission_v20.py`** 中 `_STRATEGY_PROFILE_DELTAS`；若 **`submission_v19.py`** 保留相同机制，亦可使用 `v19@rush` 等）。
 
 ---
 
@@ -59,7 +62,7 @@ profile 名：`turtle`、`rush`、`expand`、`greedy_prod`、`dual`（见 `submi
 python3.12 tools/paranoid_score.py --check-import
 ```
 
-实现 lives in `submission_v19.py`（`score_plan_actions_paranoid` 等）。
+实现 lives in **`submission_v20.py`**（`score_plan_actions_paranoid` 等；`tools/paranoid_score.py` 默认加载 v20）。
 
 ---
 
@@ -73,25 +76,25 @@ python3.12 tools/paranoid_score.py --check-import
 
 ```bash
 python3.12 tools/sweep_commit_gates.py \
-  --a v19 --b v17 --seeds 0-4 \
+  --a v20 --b v17 --seeds 0-4 \
   --combos \
   "ORB_REGION_PRESSURE_RATIO=0.68,ORB_SAFE_SURPLUS_SHIP_MULT=1.55" \
   "ORB_REGION_PRESSURE_RATIO=0.72,ORB_BASELINE_COMMIT_MARGIN=0.12"
 ```
 
-每一条 combo 会起一个子进程跑 `eval_head2head.py`；挑出胜率稳定的组合后，**把数字写回** `submission_v19.py` 的 `PHASE_TABLE` 对应字段，而不是长期靠 env。
+每一条 combo 会起一个子进程跑 `eval_head2head.py`；挑出胜率稳定的组合后，**把数字写回** **`submission_v20.py`** 的 `PHASE_TABLE` 对应字段，而不是长期靠 env。
 
 ---
 
 ## 6. RL 自对弈（训练侧）
 
-本节的 **策略训练** 与 **Kaggle 单文件 bot** 是两层东西：`RLAgent` 仍走 **v11 的 `PlanArbiter` 全栈**（生成多条候选 `Plan`），只在「选哪一条计划」上用小型神经网络替换/加强启发式；蒸馏产物默认对齐 **v11 系 `NeuralVal`（仅状态 14 维）**。v19 若未保留相同形状与接线，不能直接「换手权重」，需要改代码或单独训一条 v19 特征管线。
+本节的 **策略训练** 与 **Kaggle 单文件 bot** 是两层东西：`RLAgent` 仍走 **v11 的 `PlanArbiter` 全栈**（生成多条候选 `Plan`），只在「选哪一条计划」上用小型神经网络替换/加强启发式；蒸馏产物默认对齐 **v11 系 `NeuralVal`（仅状态 14 维）**。**v20 / v19 单文件**若未保留相同形状与接线，不能直接「换手权重」，需要改代码或单独训一条与目标 `submission` 对齐的特征管线。
 
 ### 6.1 为什么这样做会有效
 
 1. **回合级决策但终局才判胜负**：纯启发式很难在 500 步里全局一致地分配「机会成本」；PPO + GAE 用 **终局 ±1** 给出长期方向，避免每一步手写权重互相打架。
 2. **在候选计划上做策略，而不是在原始动作空间**：`PlanArbiter` 已经把防御/扩张/MCTS 等压成少量带标签的 `Plan`（见 `feature_extractor.PLAN_TAGS`）。策略网络只做 **K 选 1 的 softmax**，搜索空间小、和现有 bot 对齐，冷启动可以 **无权重时回落到 v11 启发式**（`rl_agent.py`）。
-3. **自对弈 + 固定对手池**：与「当前的自己」对打会不断暴露 exploit；混入 **v9/v10/v11 或 profile**（`--opponents` / `--opponent-mix`）能缓解策略塌缩、贴近真实 submission 分布。
+3. **自对弈 + 固定对手池**：与「当前的自己」对打会不断暴露 exploit；混入 **v9/v10/v11、静态 v20/v19 或 profile**（`--opponents` / `--opponent-mix`）能缓解策略塌缩、贴近真实 submission 分布。
 4. **密集塑形奖励**：仅用终局信号，方差很大；`rollout_worker` 在局末回填 `shaped_reward`（每隔 `DENSE_REWARD_INTERVAL` 步，用 `state_feat[0]` 的差分 × `DENSE_REWARD_WEIGHT`），再与终局胜负一起进 GAE，让中段局势变化也能推梯度。
 5. **越界惩罚进 shard**：`oob_penalty` 与塑形、终局一同写入 `rewards`，减轻「直线飞出棋盘」的可行解。
 
@@ -109,7 +112,7 @@ python3.12 tools/sweep_commit_gates.py \
 
 **局内推理**：`RLAgent` 用 NumPy 复现同一结构（权重来自 `policy_latest.npz`），与 PyTorch 导出一致。
 
-**蒸馏进提交**（`tools/distill_to_numpy.py`，可选）：教师是整个 `PolicyValueNet`；把状态 14 维后面 **补 17 维零** 喂给教师，取 **value head** 作为回归目标，训练 **学生 `StudentMLP`：`14 → 64 → 32 → 1`，tanh**，与 **`v11.NeuralVal`** 形状一致，产出 base64 写入 `submission_vN.py` 的 `_NEURAL_WEIGHTS_B64`。也就是说：**提交包里运行的仍是启发式栈 + 小价值网络修饰**；完整 31 维 plan head **不** 随默认蒸馏进 Kaggle 单文件。
+**蒸馏进提交**（`tools/distill_to_numpy.py`，可选）：教师是整个 `PolicyValueNet`；把状态 14 维后面 **补 17 维零** 喂给教师，取 **value head** 作为回归目标，训练 **学生 `StudentMLP`：`14 → 64 → 32 → 1`，tanh**，与 **`v11.NeuralVal`** 形状一致，产出 base64 写入 **`submission_v20.py`**（或你实际提交的 `submission_vN.py`）的 `_NEURAL_WEIGHTS_B64`。也就是说：**提交包里运行的仍是启发式栈 + 小价值网络修饰**；完整 31 维 plan head **不** 随默认蒸馏进 Kaggle 单文件。
 
 ### 6.3 训练中 / 训练后常改的超参数
 
@@ -151,10 +154,10 @@ python3.12 tools/rollout_worker.py \
   --games-per-worker 10 \
   --runs-dir runs/exp_mix \
   --weights runs/exp_mix/policy_latest.npz \
-  --opponent-mix "self:0.5,v13:0.35,v19@rush:0.15"
+  --opponent-mix "self:0.5,v13:0.35,v20@rush:0.15"
 ```
 
-- token：`self`（需 `--weights`）、`random`、任意可解析的 **`submission_vXX`**、`v19@rush` 等同理。
+- token：`self`（需 `--weights`）、`random`、任意可解析的 **`submission_vXX`**、`v20@rush`、`v19@turtle` 等同理。
 
 ### 6.5 交替 rollout + learner
 
@@ -185,7 +188,7 @@ python3.12 tools/distill_to_numpy.py \
   --epochs 80 --lr 1e-3 --batch 512
 ```
 
-产出文件是纯文本 base64：**整体替换**目标 `submission_vN.py` 中 `_NEURAL_WEIGHTS_B64 = "..."` 的字符串。**改权重前务必打开该 submission** 核对 `NeuralVal` **层形状**是否与 `tools/distill_to_numpy.py` 里 `StudentMLP` 一致；不一致则要先改蒸馏脚本里的学生网络再训。
+产出文件是纯文本 base64：**整体替换**目标 **`submission_v20.py`**（或对照 **`submission_v19.py`**）中 `_NEURAL_WEIGHTS_B64 = "..."` 的字符串。**改权重前务必打开该 submission** 核对 `NeuralVal` **层形状**是否与 `tools/distill_to_numpy.py` 里 `StudentMLP` 一致；不一致则要先改蒸馏脚本里的学生网络再训。
 
 可选 **BC 热身**（减少 RL 冷启动），与 PPO **共用同一 `runs-dir`**，再跑 `policy_latest.npz` 给 rollout 读：
 
@@ -204,9 +207,9 @@ python3.12 tools/imitation_pretrain.py \
 仓库提供一键脚本：**拷贝 → 语法检查 → `dist/main.py` + `dist/submission.tar.gz`**。
 
 ```bash
-./scripts/package_submission.sh submission_v19.py
-# 或指定输出目录
-OUT_DIR=dist ./scripts/package_submission.sh submission_v19.py
+./scripts/package_submission.sh submission_v20.py
+# 或指定输出目录（脚本默认源已是 v20，也可不传参直接打）
+OUT_DIR=dist ./scripts/package_submission.sh submission_v20.py
 ```
 
 产物：
@@ -217,10 +220,10 @@ OUT_DIR=dist ./scripts/package_submission.sh submission_v19.py
 **建议 Kaggle CLI（需已接受比赛规则并完成认证）：**
 
 ```bash
-kaggle competitions submit orbit-wars -f dist/submission.tar.gz -m "v19 heuristic"
+kaggle competitions submit orbit-wars -f dist/submission.tar.gz -m "v20 heuristic"
 ```
 
-上传前确认：提交文件 **自包含**（无 `import orbit_wars_bot` 等）、**含 scipy** 时 Kaggle 镜像能装依赖，且单步耗时尚未大量超时（v19 含区域聚类 + 可选悲观/MCTS，注意 wall time）。
+上传前确认：提交文件 **自包含**（无 `import orbit_wars_bot` 等）、**含 scipy** 时 Kaggle 镜像能装依赖，且单步耗时尚未大量超时（**v20** 含区域聚类 + 可选悲观/MCTS，注意 wall time）。
 
 ---
 
@@ -231,7 +234,7 @@ kaggle competitions submit orbit-wars -f dist/submission.tar.gz -m "v19 heuristi
 - **入口**：`agent(obs, config=None) → list[list]`，每项为 **`[from_planet_id, angle_rad, num_ships]`**，每回合至多 **26** 条。
 - **自包含**：上传文件不应 `import` 本仓库其它包（例如 `orbit_wars_bot`、`tools`）；RL 训练的 PyTorch **仅在线下**，进提交的是蒸馏后的 NumPy/`base64`，或纯启发式。
 - **神经网络位**：若在代码里保留了 `NeuralVal`/`_GLOBAL_NEURAL` 一类模块，替换 `_NEURAL_WEIGHTS_B64` 即用新价值头；形状必须与类实现一致。
-- **墙钟**：单机评测默认每步约一秒级预算（依比赛环境）；超重搜索（大区聚类、悲观仿真、MCTS）需在 **目标文件**里的 `PHASE_TABLE`/`deadline_ms` 等与线上时间对齐。**v19** 的深度调参与门控默认值说明写在 **`submission_v19.py`** 内 **Region 4**（`PHASE_TABLE`）上方注释块。
+- **墙钟**：单机评测默认每步约一秒级预算（依比赛环境）；超重搜索（大区聚类、悲观仿真、MCTS）需在 **目标文件**里的 `PHASE_TABLE`/`deadline_ms` 等与线上时间对齐。**v20**（及对照 **v19**）的深度调参与门控默认值说明写在对应 **`submission_v20.py` / `submission_v19.py`** 内 **Region 4**（`PHASE_TABLE`）上方注释块。
 
 ### 8.2 游戏规则摘要（读至此处理解评测与 bot 语境即可）
 
@@ -251,7 +254,9 @@ kaggle competitions submit orbit-wars -f dist/submission.tar.gz -m "v19 heuristi
 | 需求 | 代码位置 |
 |------|----------|
 | 双 bot 胜率 | `scripts/eval_head2head.py` |
-| 打 tar 包 | `scripts/package_submission.sh` |
-| v19 profile / 相位表 | `submission_v19.py`（`_STRATEGY_PROFILE_DELTAS`、`PHASE_TABLE`） |
+| 打 tar 包 | `scripts/package_submission.sh`（默认 `submission_v20.py`） |
+| 网页式 re-export | `kaggle_submit_entry.py` → `from submission_v20 import agent` |
+| 版本索引（默认提交） | `VERSIONS.md`（与 `docs/` 同级） |
+| v20（默认）/ v19（对照）profile、相位表 | **`submission_v20.py`** / `submission_v19.py`（`_STRATEGY_PROFILE_DELTAS`、`PHASE_TABLE`） |
 | RL rollout / learner | `tools/rollout_worker.py`、`tools/learner.py`、`tools/train_loop.sh` |
 | 特征与候选计划标签 | `tools/feature_extractor.py` |
