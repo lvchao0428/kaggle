@@ -16,6 +16,9 @@ Usage::
         --runs-dir runs/exp1 --weights runs/exp1/policy_latest.npz \\
         --opponents v9 v10 v11
 
+    python3.12 tools/rollout_worker.py --games-per-worker 20 \\
+        --opponent-mix "self:0.5,v13:0.35,v19@rush:0.15"
+
 If --weights is omitted, the policy is randomly initialised (still useful
 for smoke testing).
 """
@@ -49,17 +52,62 @@ DENSE_REWARD_WEIGHT = 0.10
 
 
 def load_static_agent(version: str):
-    """Load submission_<version>.py and return its `agent` callable."""
-    if version == "random":
+    """Load submission_<version>.py and return its ``agent``.
+
+    Supports ``v19@turtle``-style suffixes wired to submission_v19
+    ``ORB_STRATEGY_PROFILE`` (parallel safe per process).
+    """
+    if version.strip().lower() == "random":
         return "random"
-    path = resolve_submission_path(ROOT, version)
-    spec = importlib.util.spec_from_file_location(f"submission_{version}_rollout", path)
+    raw = version.strip()
+    profile = ""
+    if "@" in raw:
+        base, _, suf = raw.partition("@")
+        base = base.strip()
+        profile = suf.strip()
+    else:
+        base = raw
+    path = resolve_submission_path(ROOT, base)
+    mod_tag = f"{base.replace('/', '_')}__{profile}".replace("/", "_") if profile else base.replace("/", "_")
+    mod_key = f"submission_rollout_{mod_tag}".replace("/", "_").replace("\\", "_")
+    spec = importlib.util.spec_from_file_location(mod_key, path)
     if spec is None or spec.loader is None:
         raise ImportError(str(path))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"submission_{version}_rollout"] = mod
+    sys.modules[mod_key] = mod
     spec.loader.exec_module(mod)
-    return mod.agent
+    agent_fn = mod.agent
+    cv = getattr(mod, "ORB_STRATEGY_PROFILE", None)
+    if profile and cv is not None:
+
+        def wrapped(obs, cfg=None, _agent=agent_fn, _pf=profile, _cv=cv):
+            t = _cv.set(_pf)
+            try:
+                return _agent(obs, cfg)
+            finally:
+                _cv.reset(t)
+        return wrapped
+    return agent_fn
+
+
+def _parse_opponent_mix(s: str) -> List[tuple]:
+    pairs: List[tuple] = []
+    for chunk in s.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        tok, sep, wt = chunk.rpartition(":")
+        if not sep:
+            raise ValueError(f"bad opponent-mix token {chunk}")
+        pairs.append((tok.strip(), float(wt.strip())))
+    return pairs
+
+
+def _normalize_pairs(pairs: List[tuple]) -> List[tuple]:
+    total = sum(w for _, w in pairs if w > 0)
+    if total <= 0:
+        raise ValueError("opponent_mix weights sum to zero")
+    return [(tok, max(1e-6, w / total)) for tok, w in pairs]
 
 
 def load_weights(path: Optional[str]) -> Optional[Dict[str, np.ndarray]]:
@@ -152,10 +200,32 @@ def worker_main(args, worker_id: int):
     out_dir = Path(args.runs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Opponent pool: latest weights + named static bots.
+    mix_entries: Optional[List[tuple]] = None
+    static_cache: Dict[str, object] = {}
+    if getattr(args, "opponent_mix", None):
+        mix_entries = _normalize_pairs(_parse_opponent_mix(args.opponent_mix))
+
+    # Opponent pool: latest weights + named static bots (legacy path).
     opp_versions = list(args.opponents) if args.opponents else ["v11"]
     static_opponents = [load_static_agent(v) for v in opp_versions]
     weights_for_self = weights  # used when sampling 'self' opponent
+
+    def resolve_mix_opponent(tok: str):
+        kt = tok.strip().lower()
+        if kt == "self":
+            if weights_for_self is None:
+                raise RuntimeError(
+                    "--opponent-mix references self but --weights is missing")
+            return RLAgent(
+                weights=weights_for_self,
+                explore=True,
+                record=False,
+                temperature=args.temperature,
+            )
+        key = tok.strip()
+        if key not in static_cache:
+            static_cache[key] = load_static_agent(key)
+        return static_cache[key]
 
     rl_agent = RLAgent(weights=weights, explore=True, record=True,
                        temperature=args.temperature)
@@ -163,8 +233,17 @@ def worker_main(args, worker_id: int):
     games_dump: List[Dict] = []
     t0 = time.time()
     for g in range(args.games_per_worker):
-        # Opponent: 50% self (most recent weights), else random pick from pool.
-        if random.random() < 0.5 and weights_for_self is not None:
+        if mix_entries is not None:
+            acc = 0.0
+            r = random.random()
+            chosen_tok = mix_entries[-1][0]
+            for tok, w in mix_entries:
+                acc += w
+                if r <= acc:
+                    chosen_tok = tok
+                    break
+            opp = resolve_mix_opponent(chosen_tok)
+        elif random.random() < 0.5 and weights_for_self is not None:
             opp = RLAgent(weights=weights_for_self, explore=True,
                           record=False, temperature=args.temperature)
         else:
@@ -191,6 +270,12 @@ def main():
     ap.add_argument("--weights", default=None,
                     help="Path to .npz with RLAgent weights")
     ap.add_argument("--opponents", nargs="*", default=["v11", "v10", "v9"])
+    ap.add_argument(
+        "--opponent-mix",
+        default=None,
+        help=(
+            "Comma-separated tok:w pairs, weights auto-normalised, "
+            'e.g. "self:0.5,v13:0.3,v19@turtle:0.2"; overrides legacy 50/50 mix.'))
     ap.add_argument("--temperature", type=float, default=1.0)
     args = ap.parse_args()
 

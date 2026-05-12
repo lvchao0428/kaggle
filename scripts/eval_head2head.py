@@ -12,6 +12,9 @@ Examples::
     # v11 vs random, 10 seeds (10 games, A is player 0 only)
     python3.12 scripts/eval_head2head.py --a v11 --b random --seeds 0-9 --no-swap
 
+    # v19@profile activates ORB_STRATEGY_PROFILE wrappers (rush, turtle, ...)
+    python3.12 scripts/eval_head2head.py --a v19@rush --b v17 --seeds 0-4
+
     # Quick: explicit seed list, default A=v11 B=v9
     python3.12 scripts/eval_head2head.py --seeds 0 1 2 3 4
 
@@ -36,20 +39,44 @@ if str(ROOT) not in sys.path:
 from submission_resolve import resolve_submission_path
 
 
+def _parse_version_profile(version: str):
+    """Split ``v19@rush`` into (``v19``, ``rush``); profile for ORB_STRATEGY_PROFILE."""
+    if "@" not in version:
+        return version, None
+    base, _, prof = version.partition("@")
+    return base.strip(), (prof.strip() or None)
+
+
 def _load_agent(version: str):
     """Load `submission_<version>.py` and return its `agent` callable.
     Special string "random" returns the literal string (kaggle-environments
-    treats it as a built-in opponent)."""
+    treats it as a built-in opponent).
+
+    Use ``v19@turtle`` etc. to activate [submission_v19](submission_v19.py)
+    `_STRATEGY_PROFILE_DELTAS` during that agent's turns (ContextVar-safe).
+    """
     if version == "random":
         return "random"
-    path = resolve_submission_path(ROOT, version)
-    spec = importlib.util.spec_from_file_location(f"submission_{version}_eval", path)
+    base, profile = _parse_version_profile(version)
+    path = resolve_submission_path(ROOT, base)
+    mod_tag = version.replace("@", "_at_").replace(".", "_")
+    spec = importlib.util.spec_from_file_location(
+        f"submission_{mod_tag}_eval", path)
     if spec is None or spec.loader is None:
         raise ImportError(str(path))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"submission_{version}_eval"] = mod
+    sys.modules[f"submission_{mod_tag}_eval"] = mod
     spec.loader.exec_module(mod)
-    return mod.agent
+    ag = mod.agent
+    if profile and hasattr(mod, "ORB_STRATEGY_PROFILE"):
+        def wrapped(obs, cfg=None, _a=ag, _m=mod, _p=profile):
+            t = _m.ORB_STRATEGY_PROFILE.set(_p)
+            try:
+                return _a(obs, cfg)
+            finally:
+                _m.ORB_STRATEGY_PROFILE.reset(t)
+        return wrapped
+    return ag
 
 
 def _seed_random_bot(sd: int) -> None:

@@ -1,15 +1,8 @@
-"""Orbit Wars v19.0 - Regional Graph + Multi-Hop Planning.
+"""Orbit Wars v19.0 - Regional Graph + Multi-Hop Planning (single submission file).
 
-Major changes from v17/v18:
-1. RegionalGraph: clusters planets into 4 regions for regional awareness
-2. Dijkstra cache: precomputed shortest paths avoiding sun
-3. target_value_in_region(): regional bonuses for same-region targets
-4. MultiHopPlanner: plans sequential captures across hops (1-3 jumps)
-5. ProductionTimeline: models future surplus availability
-6. Safe surplus: balances offense vs defense based on threats
-
-This is a comprehensive strategic overhaul moving from scattered fleet allocation
-to coordinated regional expansion with multi-hop planning.
+Regional utilities, clustering, timeline, multi-hop scaffold, unified
+``capture_edge_score``, pragmatic action UCB, and threat-aware surplus live
+in this module only (no separate regional import).
 """
 
 from __future__ import annotations
@@ -17,24 +10,21 @@ from __future__ import annotations
 import base64
 import io
 import math
+import os
 import random
 import time
 from collections import defaultdict
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+from scipy.cluster.hierarchy import fclusterdata
 
-# Import regional graph infrastructure
-try:
-    from submission_v19_regional import (
-        RegionalGraph, Region, Wave, ProductionTimeline,
-        calculate_safe_surplus, MultiHopPlanner
-    )
-except ImportError:
-    # Fallback if module not available
-    RegionalGraph = None
-    MultiHopPlanner = None
+# Set by eval / rollout wrappers (`v19@rush`); Kaggle never touches this.
+ORB_STRATEGY_PROFILE: ContextVar[Optional[str]] = ContextVar(
+    "ORB_STRATEGY_PROFILE", default=None
+)
 
 
 # ╔═══ region 0: constants & helpers ════════════════════════════════════════╗
@@ -108,6 +98,213 @@ def swept_pair_hit(
     t1 = (-b - sq) / (2.0 * a)
     t2 = (-b + sq) / (2.0 * a)
     return t2 >= 0.0 and t1 <= 1.0
+
+
+# ╔═══ region 0b: v19 regional graph (inlined; no external module) ══════════╗
+
+
+@dataclass
+class Region:
+    """Spatial region cluster (centroid + optional bookkeeping fields)."""
+    id: int
+    center: Tuple[float, float]
+    my_planets: List[int] = field(default_factory=list)
+    enemy_planets: List[int] = field(default_factory=list)
+    external_planets: List[int] = field(default_factory=list)
+    production_rate: int = 0
+
+
+@dataclass
+class Wave:
+    target_id: int
+    required_ships: int
+    launch_turn: int
+    sources: List[int] = field(default_factory=list)
+    expected_arrival: int = 0
+
+
+class RegionalGraph:
+    """Geographic clustering (4 regions) + cached path lengths (sun-aware penalty)."""
+
+    def __init__(self, planets: List, spawn_positions: Optional[List[Tuple[float, float]]] = None):
+        self.planets = planets
+        self.regions: Dict[int, Region] = {}
+        self.planet_to_region: Dict[int, int] = {}
+        self.dijkstra_cache: Dict[Tuple[int, int], Tuple[float, int]] = {}
+
+        coords = np.array([[p.x, p.y] for p in planets])
+        try:
+            cluster_labels = fclusterdata(coords, t=4, criterion="maxclust", method="complete")
+            self._build_regions(cluster_labels, spawn_positions)
+        except Exception:
+            self._build_regions_fallback(spawn_positions)
+
+        self._precompute_dijkstra()
+
+    def _build_regions(self, cluster_labels: np.ndarray, spawn_positions: Optional[List] = None):
+        clusters: Dict[int, List] = {}
+        for planet, cluster_id in zip(self.planets, cluster_labels):
+            clusters.setdefault(cluster_id, []).append(planet)
+
+        region_list: List[Region] = []
+        for cluster_id in sorted(clusters.keys())[:4]:
+            planets_in_cluster = clusters[cluster_id]
+            center_x = sum(p.x for p in planets_in_cluster) / len(planets_in_cluster)
+            center_y = sum(p.y for p in planets_in_cluster) / len(planets_in_cluster)
+            region = Region(id=len(region_list), center=(center_x, center_y))
+            region_list.append(region)
+            for p in planets_in_cluster:
+                self.planet_to_region[p.id] = region.id
+
+        self.regions = {r.id: r for r in region_list}
+
+    def _build_regions_fallback(self, spawn_positions: Optional[List] = None):
+        if spawn_positions and len(spawn_positions) >= 2:
+            spawn_array = np.array(
+                spawn_positions[:4] if len(spawn_positions) >= 4 else spawn_positions * 2
+            )
+        else:
+            spawn_array = np.array([(25, 25), (75, 25), (25, 75), (75, 75)])
+
+        for planet in self.planets:
+            distances = [math.hypot(planet.x - sp[0], planet.y - sp[1]) for sp in spawn_array]
+            nearest_region = distances.index(min(distances)) % 4
+            self.planet_to_region[planet.id] = nearest_region
+
+        for i in range(4):
+            self.regions[i] = Region(id=i, center=tuple(spawn_array[i]))
+
+    def _precompute_dijkstra(self):
+        planet_ids = [p.id for p in self.planets]
+        for src_id in planet_ids:
+            for dst_id in planet_ids:
+                if src_id != dst_id:
+                    distance, steps = self._dijkstra_impl(src_id, dst_id)
+                    self.dijkstra_cache[(src_id, dst_id)] = (distance, steps)
+
+    def _dijkstra_impl(self, src_id: int, dst_id: int) -> Tuple[float, int]:
+        src = next((p for p in self.planets if p.id == src_id), None)
+        dst = next((p for p in self.planets if p.id == dst_id), None)
+        if not src or not dst:
+            return 999.0, 999
+
+        direct_dist = math.hypot(src.x - dst.x, src.y - dst.y)
+        if point_segment_distance(SUN_X, SUN_Y, src.x, src.y, dst.x, dst.y) < SUN_RADIUS + 3.0:
+            total_dist = direct_dist + SUN_RADIUS * 2
+        else:
+            total_dist = direct_dist
+        steps = max(1, int(math.ceil(total_dist / 2.0)))
+        return total_dist, steps
+
+    def dijkstra(self, src_id: int, dst_id: int) -> Tuple[float, int]:
+        key = (src_id, dst_id)
+        if key in self.dijkstra_cache:
+            return self.dijkstra_cache[key]
+        return 999.0, 999
+
+    def in_same_region(self, pid1: int, pid2: int) -> bool:
+        return self.planet_to_region.get(pid1, -1) == self.planet_to_region.get(pid2, -1)
+
+    def get_region_by_id(self, region_id: int) -> Optional[Region]:
+        return self.regions.get(region_id)
+
+    def get_region_by_planet(self, planet_id: int) -> Optional[Region]:
+        region_id = self.planet_to_region.get(planet_id, -1)
+        return self.regions.get(region_id)
+
+    def region_production(self, region_id: int, my_control: Set[int]) -> int:
+        if region_id not in self.regions:
+            return 0
+        production = 0
+        for planet in self.planets:
+            if planet.id in my_control and self.planet_to_region.get(planet.id) == region_id:
+                production += planet.production
+        return production
+
+    def region_threat(self, region_id: int, enemy_planets: Sequence) -> float:
+        region = self.regions.get(region_id)
+        if not region:
+            return 0.0
+        rcx, rcy = region.center
+        total = 0.0
+        for p in enemy_planets:
+            pr = self.planet_to_region.get(p.id, -1)
+            prod = float(getattr(p, "production", 0) or 0)
+            ships = int(getattr(p, "ships", 0) or 0)
+            if pr == region_id:
+                total += prod * 2.2 + math.sqrt(max(1, ships)) * 0.25
+            else:
+                d = math.hypot(p.x - rcx, p.y - rcy)
+                if d < 42.0:
+                    w = max(0.0, (42.0 - d) / 42.0)
+                    total += w * (prod * 1.4 + math.sqrt(max(1, ships)) * 0.12)
+        return total
+
+    def get_all_regions(self) -> List[Region]:
+        return list(self.regions.values())
+
+    def get_planets_in_region(self, region_id: int) -> List:
+        return [p for p in self.planets if self.planet_to_region.get(p.id) == region_id]
+
+
+class ProductionTimeline:
+    def __init__(self, planets: List, my_control: Set[int]):
+        self.planets = planets
+        self.my_control = my_control
+
+    def predict_surplus(self, planet_ids: List[int], turns_ahead: int) -> List[int]:
+        surplus_per_turn: List[int] = []
+        for turn in range(turns_ahead):
+            production = sum(
+                p.production for p in self.planets
+                if p.id in planet_ids and p.id in self.my_control
+            )
+            accumulated = production * (turn + 1)
+            available = int(accumulated * 0.8)
+            surplus_per_turn.append(available)
+        return surplus_per_turn
+
+    def can_support_wave(self, sources: List[int], required: int, launch_turn: int) -> bool:
+        surpluses = self.predict_surplus(sources, launch_turn + 1)
+        if launch_turn < len(surpluses):
+            return surpluses[launch_turn] >= required
+        return False
+
+
+def calculate_safe_surplus(my_planets: List, my_production: int, enemy_threats: Dict) -> int:
+    max_threat = max(enemy_threats.values()) if enemy_threats else 0
+    defensive_requirement = int(max_threat * 1.5)
+    safe_surplus = my_production - defensive_requirement
+    return max(0, int(safe_surplus * 0.65))
+
+
+class MultiHopPlanner:
+    def __init__(self, regional_graph: RegionalGraph, production_timeline: ProductionTimeline):
+        self.regional_graph = regional_graph
+        self.timeline = production_timeline
+
+    def plan_attack_sequence(
+        self, target_id: int, my_region_id: int, budget_turns: int = 5, max_hops: int = 3
+    ) -> List[Wave]:
+        target_planet = next((p for p in self.regional_graph.planets if p.id == target_id), None)
+        if not target_planet:
+            return []
+        my_sources = [
+            p for p in self.regional_graph.planets
+            if self.regional_graph.planet_to_region.get(p.id) == my_region_id
+        ]
+        if not my_sources:
+            return []
+        source_planet = my_sources[0]
+        _distance, steps = self.regional_graph.dijkstra(source_planet.id, target_id)
+        wave = Wave(
+            target_id=target_id,
+            required_ships=int(target_planet.ships + target_planet.production * 2),
+            launch_turn=0,
+            sources=[s.id for s in my_sources[:3]],
+            expected_arrival=steps,
+        )
+        return [wave]
 
 
 # ╔═══ region 1: data classes ═══════════════════════════════════════════════╗
@@ -620,28 +817,23 @@ class Snapshot:
         self.used[pid] += int(ships)
 
     def calculate_safe_surplus_v19(self, regional_graph: Optional[RegionalGraph] = None) -> int:
-        """Calculate ships safe to use for offense (v19 regional-aware).
-
-        Uses regional_graph if available for threat estimation, falls back to
-        simple calculation otherwise.
-
-        Returns: ships available for offensive operations
-        """
+        """Ship budget for strategic commits from current per-planet avail pools."""
+        avail_total = sum(self.avail(p.id) for p in self.state.my_pl)
+        if avail_total <= ABS_MIN_BATCH:
+            return 0
         if not regional_graph:
-            # Fallback: simple calculation
-            total_surplus = sum(self.surplus.values())
-            return int(total_surplus * 0.65)
+            return max(ABS_MIN_BATCH, int(avail_total * 0.65))
 
-        # Calculate per-region threat
-        enemy_threats = {}
-        for region_id in regional_graph.regions.keys():
-            threat = regional_graph.region_threat(region_id, {})
-            enemy_threats[region_id] = threat
-
-        # Use regional safe_surplus calculation
-        my_planets = self.state.my_pl
-        my_production = sum(p.production for p in my_planets)
-        return calculate_safe_surplus(my_planets, my_production, enemy_threats)
+        threats = [
+            regional_graph.region_threat(rid, self.state.en_pl)
+            for rid in regional_graph.regions
+        ]
+        max_t = max(threats) if threats else 0.0
+        my_prod = float(sum(p.production for p in self.state.my_pl))
+        pressure = max_t / max(my_prod, 1.0)
+        pressure = min(1.35, pressure)
+        alloc_frac = max(0.45, min(0.82, 0.82 - pressure * 0.28))
+        return max(ABS_MIN_BATCH, int(avail_total * alloc_frac))
 
     def is_safe_investment(self, dst: Planet, eta: int) -> bool:
         """Bocsimacko `safe-to-invest-p` port (player.lisp:1079).
@@ -674,56 +866,205 @@ class Snapshot:
 
 
 # ╔═══ region 4: PhasePolicy ════════════════════════════════════════════════╗
-
+#
+# ── How to iterate parameters (offline → Kaggle) ───────────────────────────
+#
+# 1) Canonical knobs live only in PHASE_TABLE below (early / mid / late).
+#    Typical groups:
+#    - Economy vs aggression: reserve_growth_mul, cost_pen_mul,
+#      cost_pen_neutral_mul, urgent_attack_ratio, mode_order.
+#    - Search cost: mcts_* , pragmatic_mcts_* , neural_modifier_strength ,
+#      sim_steps , tempo_floor.
+#    - Commit gates (were magic numbers): region_pressure_ratio,
+#      safe_surplus_ship_mult — used when regional_graph is active in
+#      PlanArbiter.commit_best; baseline_commit_margin vs idle baseline.
+#    - Pessimistic 1-enemy-rollout rerank: paranoid_score_budget_ms (early=0),
+#      paranoid_plan_top_k , paranoid_steps , paranoid_blend — see
+#      score_plan_actions_paranoid + PlanArbiter.score_with_modifiers .
+#
+# 2) Sweep without editing the table: export ORB_REGION_PRESSURE_RATIO ,
+#    ORB_SAFE_SURPLUS_SHIP_MULT , ORB_BASELINE_COMMIT_MARGIN per process ;
+#    _merged_phase_row() overlays them onto PHASE_TABLE reads. Useful with
+#    tools/sweep_commit_gates.py wrapping scripts/eval_head2head.py .
+#
+# 3) Scripted eval: scripts/eval_head2head.py --a v19 --b v17 --seeds 0-19 .
+#    Style overlays (same file, ContextVar-safe): --a v19@rush ,
+#    v19@turtle — ORB_STRATEGY_PROFILE merges _STRATEGY_PROFILE_DELTAS .
+#
+# 4) Smoked pessimistic math (no episode): python3 tools/paranoid_score.py
+#
+# 5) RL self-play opponent mix (tools/rollout_worker.py): --opponent-mix
+#    "self:0.5,v13:0.3,v19@expand:0.2" — weights normalized; tokens are load
+#    paths or ``self``.
+#
+# 6) Acceptance: prefer 20+ double-seeded games; watch step wall-time (arbiter
+#    skips paranoid when over paranoid_score_budget_ms).
+#
 # Single source of truth for phase-dependent tuning. Adjusting strategy = edit
-# one row.
+# one row (or overlay env/profile as above).
+
 PHASE_TABLE: Dict[str, Dict[str, object]] = {
     "early": dict(
-        reserve_growth_mul=2,                # v14: was 4; lower reserve unlocks surplus fast
+        reserve_growth_mul=2,
         cost_pen_mul=0.75,
         cost_pen_neutral_mul=0.70,
-        urgent_attack_ratio=3.0,             # v14: was 999 (disabled); allow urgent on close HP stars
-        urgent_attack_min_prod=3,            # v14: was 99; grab nearby prod>=3 early
-        mode_order=["expand", "aggro", "counter", "balanced", "comet"],  # v14: added aggro/counter
-        mcts_budget_ms=0,                    # no MCTS early (too slow)
+        urgent_attack_ratio=3.0,
+        urgent_attack_min_prod=3,
+        mode_order=["expand", "aggro", "counter", "balanced", "comet"],
+        mcts_budget_ms=0,
         mcts_max_iters=0,
+        pragmatic_mcts_budget_ms=0,
+        pragmatic_mcts_max_iters=0,
+        pragmatic_mcts_top_k=6,
+        pragmatic_mcts_rollout_steps=12,
         neural_modifier_strength=0.10,
-        recapture_mul=1.2,                   # v14: higher recapture urgency early
-        approach_weight=1.8,                 # v14: stronger bias toward approaching orbit planets
+        recapture_mul=1.2,
+        approach_weight=1.8,
         sim_steps=8,
-        tempo_floor=1,                       # neutral - eval as-is
+        tempo_floor=1,
+        region_pressure_ratio=0.72,
+        safe_surplus_ship_mult=1.55,
+        baseline_commit_margin=0.10,
+        paranoid_score_budget_ms=0,
+        paranoid_plan_top_k=4,
+        paranoid_steps=8,
+        paranoid_blend=0.0,
     ),
     "mid": dict(
-        reserve_growth_mul=3,                # v14: was 4; keep some aggression in mid
+        reserve_growth_mul=3,
         cost_pen_mul=0.80,
         cost_pen_neutral_mul=0.74,
-        urgent_attack_ratio=1.05,            # only press when ahead
+        urgent_attack_ratio=1.05,
         urgent_attack_min_prod=4,
-        mode_order=["aggro", "expand", "counter", "balanced", "comet"],  # v14: aggro first in mid
+        mode_order=["aggro", "expand", "counter", "balanced", "comet"],
         mcts_budget_ms=120,
         mcts_max_iters=50,
+        pragmatic_mcts_budget_ms=55,
+        pragmatic_mcts_max_iters=28,
+        pragmatic_mcts_top_k=6,
+        pragmatic_mcts_rollout_steps=14,
         neural_modifier_strength=0.12,
         recapture_mul=1.10,
         approach_weight=1.55,
         sim_steps=8,
-        tempo_floor=2,                       # Bocsimacko's "min-turn-to-depart=2"
+        tempo_floor=2,
+        region_pressure_ratio=0.72,
+        safe_surplus_ship_mult=1.55,
+        baseline_commit_margin=0.10,
+        paranoid_score_budget_ms=40,
+        paranoid_plan_top_k=5,
+        paranoid_steps=8,
+        paranoid_blend=0.42,
     ),
     "late": dict(
-        reserve_growth_mul=4,                # v14: was 5; slightly lower to stay active late
+        reserve_growth_mul=4,
         cost_pen_mul=0.78,
         cost_pen_neutral_mul=0.70,
-        urgent_attack_ratio=0.90,            # press even at slight deficit
+        urgent_attack_ratio=0.90,
         urgent_attack_min_prod=3,
         mode_order=["aggro", "counter", "expand", "balanced", "comet"],
         mcts_budget_ms=200,
         mcts_max_iters=80,
+        pragmatic_mcts_budget_ms=85,
+        pragmatic_mcts_max_iters=36,
+        pragmatic_mcts_top_k=8,
+        pragmatic_mcts_rollout_steps=16,
         neural_modifier_strength=0.15,
         recapture_mul=1.18,
         approach_weight=1.40,
         sim_steps=10,
-        tempo_floor=1,                       # late - value every wave
+        tempo_floor=1,
+        region_pressure_ratio=0.72,
+        safe_surplus_ship_mult=1.55,
+        baseline_commit_margin=0.10,
+        paranoid_score_budget_ms=62,
+        paranoid_plan_top_k=5,
+        paranoid_steps=10,
+        paranoid_blend=0.48,
     ),
 }
+
+# Optional per-profile overrides for local eval / rollouts via ORB_STRATEGY_PROFILE.
+# Naming mirrors Planet-Wars-style archetypes (Java PW bots cannot run here);
+# README lists PW ↔ profile mapping.
+_STRATEGY_PROFILE_DELTAS: Dict[str, Dict[str, object]] = {
+    "turtle": dict(
+        reserve_growth_mul_delta=+2,
+        urgent_attack_ratio_delta=+0.35,
+        cost_pen_mul_delta=+0.06,
+        cost_pen_neutral_mul_delta=+0.05,
+    ),
+    "rush": dict(
+        reserve_growth_mul_delta=-1,
+        urgent_attack_ratio_delta=-0.20,
+        cost_pen_mul_delta=-0.06,
+        mode_order_override=["aggro", "counter", "expand", "balanced", "comet"],
+    ),
+    "expand": dict(
+        cost_pen_mul_delta=-0.10,
+        cost_pen_neutral_mul_delta=-0.08,
+        mode_order_override=["expand", "balanced", "aggro", "counter", "comet"],
+    ),
+    "greedy_prod": dict(
+        urgent_attack_min_prod_delta=-1,
+        recapture_mul_delta=+0.12,
+        cost_pen_mul_delta=-0.04,
+    ),
+    "dual": dict(
+        urgent_attack_ratio_delta=+0.12,
+        mode_order_override=["expand", "aggro", "counter", "balanced", "comet"],
+    ),
+}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _merged_phase_row(ph: str) -> Dict[str, object]:
+    """Merge PHASE_TABLE[ph] with profile deltas and optional env gate floats.
+
+    When set in the environment, ORB_REGION_PRESSURE_RATIO,
+    ORB_SAFE_SURPLUS_SHIP_MULT, ORB_BASELINE_COMMIT_MARGIN override the row.
+    """
+    row: Dict[str, object] = dict(PHASE_TABLE[ph])
+    prof = ORB_STRATEGY_PROFILE.get(None)
+    if isinstance(prof, str) and prof.strip():
+        deltas = _STRATEGY_PROFILE_DELTAS.get(prof.strip().lower())
+        if deltas:
+            for k, dv in deltas.items():
+                if k == "mode_order_override":
+                    row["mode_order"] = list(dv)  # type: ignore[arg-type]
+                    continue
+                if k.endswith("_delta"):
+                    base_key = k[:-6]
+                    old = row.get(base_key)
+                    if old is None:
+                        continue
+                    if isinstance(old, bool):
+                        continue
+                    if isinstance(old, int):
+                        row[base_key] = int(old) + int(dv)  # type: ignore[arg-type]
+                    elif isinstance(old, float):
+                        row[base_key] = float(old) + float(dv)  # type: ignore[arg-type]
+            rgm = int(row.get("reserve_growth_mul", 2))
+            row["reserve_growth_mul"] = max(1, min(8, rgm))
+    row["region_pressure_ratio"] = _env_float(
+        "ORB_REGION_PRESSURE_RATIO", float(row.get("region_pressure_ratio", 0.72))
+    )
+    row["safe_surplus_ship_mult"] = _env_float(
+        "ORB_SAFE_SURPLUS_SHIP_MULT", float(row.get("safe_surplus_ship_mult", 1.55))
+    )
+    row["baseline_commit_margin"] = _env_float(
+        "ORB_BASELINE_COMMIT_MARGIN", float(row.get("baseline_commit_margin", 0.10))
+    )
+    return row
 
 
 @dataclass
@@ -738,16 +1079,27 @@ class PhasePolicy:
     mode_order: List[str]
     mcts_budget_ms: float
     mcts_max_iters: int
+    pragmatic_mcts_budget_ms: float
+    pragmatic_mcts_max_iters: int
+    pragmatic_mcts_top_k: int
+    pragmatic_mcts_rollout_steps: int
     neural_modifier_strength: float
     recapture_mul: float
     approach_weight: float
     sim_steps: int
     tempo_floor: int
+    region_pressure_ratio: float
+    safe_surplus_ship_mult: float
+    baseline_commit_margin: float
+    paranoid_score_budget_ms: float
+    paranoid_plan_top_k: int
+    paranoid_steps: int
+    paranoid_blend: float
 
     @classmethod
     def for_state(cls, state: GameState) -> "PhasePolicy":
         ph = state.phase()
-        row = PHASE_TABLE[ph]
+        row = _merged_phase_row(ph)
         return cls(
             phase=ph,
             reserve_growth_mul=int(row["reserve_growth_mul"]),
@@ -758,11 +1110,22 @@ class PhasePolicy:
             mode_order=list(row["mode_order"]),  # type: ignore[arg-type]
             mcts_budget_ms=float(row["mcts_budget_ms"]),
             mcts_max_iters=int(row["mcts_max_iters"]),
+            pragmatic_mcts_budget_ms=float(row["pragmatic_mcts_budget_ms"]),
+            pragmatic_mcts_max_iters=int(row["pragmatic_mcts_max_iters"]),
+            pragmatic_mcts_top_k=int(row["pragmatic_mcts_top_k"]),
+            pragmatic_mcts_rollout_steps=int(row["pragmatic_mcts_rollout_steps"]),
             neural_modifier_strength=float(row["neural_modifier_strength"]),
             recapture_mul=float(row["recapture_mul"]),
             approach_weight=float(row["approach_weight"]),
             sim_steps=int(row["sim_steps"]),
             tempo_floor=int(row["tempo_floor"]),
+            region_pressure_ratio=float(row["region_pressure_ratio"]),
+            safe_surplus_ship_mult=float(row["safe_surplus_ship_mult"]),
+            baseline_commit_margin=float(row["baseline_commit_margin"]),
+            paranoid_score_budget_ms=float(row["paranoid_score_budget_ms"]),
+            paranoid_plan_top_k=int(row["paranoid_plan_top_k"]),
+            paranoid_steps=int(row["paranoid_steps"]),
+            paranoid_blend=float(row["paranoid_blend"]),
         )
 
 
@@ -803,72 +1166,6 @@ def contest_penalty(state: GameState, dst: Planet) -> float:
         return 0.0
     return min(40.0, en_inc * 0.6)
 
-
-
-def target_value_in_region(snap: Snapshot, src: Planet, dst: Planet, regional_graph: Optional[RegionalGraph] = None) -> float:
-    """Score a target considering regional cohesion (v19 regional-aware version).
-
-    Args:
-        snap: Snapshot state
-        src: source planet
-        dst: destination target
-        regional_graph: optional RegionalGraph for regional bonuses
-
-    Returns: score value (higher is better)
-    """
-    state = snap.state
-    if dst.owner == state.my_id or src.id == dst.id:
-        return -1e18
-
-    need, eta = capture_need(state, src, dst)
-    if need <= 0:
-        return -1e18
-
-    # Basic production value
-    raw_turns = max(1, state.turns_left() - eta)
-    turns = min(raw_turns, HORIZON_TURNS)
-    prod_value = dst.production * turns
-
-    # Regional bonus: same region targets get 2.0x boost, cross-region get 0.5x
-    regional_bonus = 1.0
-    if regional_graph:
-        same_region = regional_graph.in_same_region(src.id, dst.id)
-        regional_bonus = 2.0 if same_region else 0.5
-
-    # Path cost from dijkstra (if available)
-    path_cost_factor = 0.2
-    if regional_graph:
-        distance, _ = regional_graph.dijkstra(src.id, dst.id)
-        path_cost = distance * path_cost_factor
-    else:
-        path_cost = eta * 0.34  # fallback to era penalty
-
-    # Enemy bonus and threat penalty
-    is_en = dst.owner not in (-1, state.my_id)
-    enemy_bonus = 38.0 if is_en else 0.0
-
-    # Threat penalty if enemies are close to target
-    threat_penalty = 0.0
-    for enemy in state.en_pl:
-        enemy_eta, _ = lead_intercept(state, enemy, dst, max(1, enemy.ships))
-        if enemy_eta < eta + 3:
-            threat_penalty += 20.0
-
-    # Production tier bonus (same as v18)
-    prod_tier_bonus = 0.0
-    if dst.production >= 5:
-        prod_tier_bonus = 20.0 + dst.production * 3.0
-    elif dst.production >= 3:
-        prod_tier_bonus = 8.0 + dst.production * 2.0
-
-    # Final scoring
-    score = (prod_value + prod_tier_bonus + enemy_bonus) * regional_bonus
-    score -= path_cost + threat_penalty
-
-    # Normalize by eta
-    score /= max(1.0, eta ** 0.25)
-
-    return score
 
 
 def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, int]:
@@ -957,6 +1254,70 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     score = (prod_value + prod_bonus + enemy_bonus + comet_bonus + rec_bonus) * distance_decay
     score -= cost_pen + snipe_pen
     return score, need, eta
+
+
+def regional_capture_adjustment(
+    snap: Snapshot,
+    src: Planet,
+    dst: Planet,
+    regional_graph: RegionalGraph,
+    eta: int,
+) -> float:
+    """Additive regional layer: cohesion bonus or cross-zone expedition tax."""
+    state = snap.state
+    my_ids = {p.id for p in state.my_pl}
+    rid_s = regional_graph.planet_to_region.get(src.id, -1)
+    rid_d = regional_graph.planet_to_region.get(dst.id, -1)
+    if rid_s < 0 or rid_d < 0:
+        return 0.0
+
+    ddist, _ = regional_graph.dijkstra(src.id, dst.id)
+    dist_cost = 0.12 * min(ddist, 80.0)
+
+    if rid_s == rid_d:
+        my_prod = regional_graph.region_production(rid_d, my_ids)
+        bonus = 6.0 + min(20.0, float(my_prod) * 1.4)
+        pot = 0.0
+        for p in regional_graph.get_planets_in_region(rid_d):
+            if p.id == dst.id:
+                continue
+            if p.owner == -1:
+                pot += float(p.production) + 0.5
+            elif p.owner in state.en_ids:
+                eg = state.effective_garrison(p)
+                if eg < p.ships * 0.65:
+                    pot += float(p.production) * 0.6
+        bonus += min(16.0, pot * 1.8)
+        return bonus - dist_cost * 0.35
+
+    cross = 8.0 + 0.040 * float(eta * eta)
+    return -cross - dist_cost
+
+
+def capture_edge_score(
+    snap: Snapshot,
+    src: Planet,
+    dst: Planet,
+    regional_graph: Optional[RegionalGraph] = None,
+) -> Tuple[float, int, int]:
+    """Unified capture ranking: heuristic target_score + optional regional layer."""
+    base, need, eta = target_score(snap, src, dst)
+    if regional_graph is None or base <= -1e17:
+        return base, need, eta
+    adj = regional_capture_adjustment(snap, src, dst, regional_graph, eta)
+    return base + adj, need, eta
+
+
+def target_value_in_region(
+    snap: Snapshot,
+    src: Planet,
+    dst: Planet,
+    regional_graph: Optional[RegionalGraph] = None,
+) -> float:
+    """Same scalar as ``capture_edge_score`` first component (compat / tooling)."""
+    sc, _, _ = capture_edge_score(snap, src, dst, regional_graph)
+    return sc
+
 
 
 def elite_eval(state: GameState) -> float:
@@ -1062,6 +1423,35 @@ class Plan:
     urgent: bool = False  # if True, commit before scoring strategic plans
 
 
+def _prep_sim_own_launches(state: GameState, actions: List[Tuple[int, int, int]],
+                           tempo_floor: int) -> Tuple[Dict[int, SimP], List[SimF]]:
+    """Clone + apply our launches + tempo_floor idle sim (before eval window)."""
+    planets, fleets = clone_sim(state)
+    used: Dict[int, int] = defaultdict(int)
+    for sid, did, ships in actions:
+        sp = state.get(sid); dp = state.get(did); sim_src = planets.get(sid)
+        if sp is None or dp is None or sim_src is None or sim_src.owner != state.my_id:
+            continue
+        send = min(int(ships), max(0, sim_src.ships - ABS_MIN_BATCH - used[sid]))
+        if send <= 0:
+            continue
+        _, eta = safe_aim(state, sp, dp, send)
+        sim_src.ships -= send
+        used[sid] += send
+        fleets.append(SimF(state.my_id, did, send, eta))
+    for _ in range(max(0, tempo_floor - 1)):
+        sim_step(planets, fleets)
+    return planets, fleets
+
+
+def _rollout_eval(state: GameState, planets: Dict[int, SimP], fleets: List[SimF],
+                  steps: int) -> float:
+    p, f = copy_sim(planets, fleets)
+    for _ in range(steps):
+        sim_step(p, f)
+    return eval_sim_planets(state, p, f)
+
+
 def score_plan_actions(state: GameState, actions: List[Tuple[int, int, int]],
                        steps: int = 8, tempo_floor: int = 1) -> float:
     """Score by simulating `steps` turns after applying actions to a clone.
@@ -1073,26 +1463,169 @@ def score_plan_actions(state: GameState, actions: List[Tuple[int, int, int]],
     within the eval window without those follow-ups. tempo_floor=1 means
     evaluate as-is.
     """
-    planets, fleets = clone_sim(state)
-    used: Dict[int, int] = defaultdict(int)
-    for sid, did, ships in actions:
-        sp = state.get(sid); dp = state.get(did); sim_src = planets.get(sid)
-        if sp is None or dp is None or sim_src is None or sim_src.owner != state.my_id:
-            continue
-        # Re-derive surplus from sim state (Snapshot may have evolved already).
-        send = min(int(ships), max(0, sim_src.ships - ABS_MIN_BATCH - used[sid]))
-        if send <= 0:
-            continue
-        _, eta = safe_aim(state, sp, dp, send)
-        sim_src.ships -= send
-        used[sid] += send
-        fleets.append(SimF(state.my_id, did, send, eta))
-    # Bocsimacko tempo-floor: extra idle sim steps before scoring window.
-    for _ in range(max(0, tempo_floor - 1)):
-        sim_step(planets, fleets)
-    for _ in range(steps):
-        sim_step(planets, fleets)
-    return eval_sim_planets(state, planets, fleets)
+    planets, fleets = _prep_sim_own_launches(state, actions, tempo_floor)
+    return _rollout_eval(state, planets, fleets, steps)
+
+
+def _primary_enemy_id(state: GameState) -> Optional[int]:
+    if not state.en_ids:
+        return None
+    return max(state.en_ids, key=lambda e: state.total_ships(e))
+
+
+def _try_append_enemy_fleet(
+    state: GameState,
+    planets: Dict[int, SimP],
+    fleets: List[SimF],
+    enemy_id: int,
+    src_id: int,
+    dst_id: int,
+    want_ships: int,
+) -> bool:
+    sp = planets.get(src_id)
+    dp = planets.get(dst_id)
+    geo_s = state.get(src_id)
+    geo_d = state.get(dst_id)
+    if sp is None or dp is None or geo_s is None or geo_d is None:
+        return False
+    if sp.owner != enemy_id:
+        return False
+    max_send = max(0, sp.ships - ABS_MIN_BATCH)
+    send = min(max(int(want_ships), ABS_MIN_BATCH), max_send)
+    if send < ABS_MIN_BATCH:
+        return False
+    _, eta = safe_aim(state, geo_s, geo_d, send)
+    sp.ships -= send
+    fleets.append(SimF(enemy_id, dst_id, send, eta))
+    return True
+
+
+def _inject_paranoid_profile(
+    state: GameState,
+    planets: Dict[int, SimP],
+    fleets: List[SimF],
+    enemy_id: int,
+    profile_key: str,
+) -> None:
+    """Mutate planets/fleets with one pessimistic opponent launch."""
+    mi = state.my_id
+    enemy_pids = [pid for pid, sp in planets.items()
+                  if sp.owner == enemy_id and sp.ships >= ABS_MIN_BATCH * 2]
+    my_pids = [pid for pid, sp in planets.items() if sp.owner == mi]
+    neu_pids = [pid for pid, sp in planets.items() if sp.owner == -1]
+    cx, cy = state.centroid()
+
+    want = ABS_MIN_BATCH * 8
+
+    if profile_key == "nearest_my":
+        best = None
+        for eid in enemy_pids:
+            ge = state.get(eid)
+            if ge is None:
+                continue
+            for mid in my_pids:
+                gm = state.get(mid)
+                if gm is None:
+                    continue
+                d = ge.dist(gm)
+                if best is None or d < best[0]:
+                    best = (d, eid, mid)
+        if best:
+            _, eid, mid = best
+            _try_append_enemy_fleet(state, planets, fleets, enemy_id, eid, mid,
+                                    want)
+
+    elif profile_key == "contest_neutral" and neu_pids:
+        neu_pids_sorted = sorted(
+            neu_pids,
+            key=lambda nid: math.hypot(state.get(nid).x - cx, state.get(nid).y - cy)
+            if state.get(nid) else 999)
+        tgt = None
+        for nid in neu_pids_sorted[:6]:
+            gn = state.get(nid)
+            if gn is None:
+                continue
+            best_ep = None
+            for eid in enemy_pids:
+                ge = state.get(eid)
+                if ge is None:
+                    continue
+                d = ge.dist(gn)
+                if best_ep is None or d < best_ep[0]:
+                    best_ep = (d, eid)
+            if best_ep:
+                tgt = (best_ep[1], nid)
+                break
+        if tgt:
+            _try_append_enemy_fleet(state, planets, fleets, enemy_id, tgt[0], tgt[1],
+                                    want)
+
+    elif profile_key == "strike_high_prod_my" and my_pids:
+        mid = max(my_pids, key=lambda pid: state.get(pid).production
+                   if state.get(pid) else 0)
+        gm = state.get(mid)
+        if gm is None:
+            return
+        best_ep = None
+        for eid in enemy_pids:
+            ge = state.get(eid)
+            if ge is None:
+                continue
+            d = ge.dist(gm)
+            if best_ep is None or d < best_ep[0]:
+                best_ep = (d, eid)
+        if best_ep:
+            _try_append_enemy_fleet(state, planets, fleets, enemy_id,
+                                    best_ep[1], mid,
+                                    max(want, ABS_MIN_BATCH * 12))
+
+
+def score_plan_actions_paranoid(
+    state: GameState,
+    actions: List[Tuple[int, int, int]],
+    steps: int,
+    tempo_floor: int,
+    par_steps: Optional[int] = None,
+) -> Tuple[float, float]:
+    """Return ``(baseline_sim, pessimistic_sim)``
+
+    Baseline ignores fresh opponent fleets; pessimistic inserts up to three
+    single-launch pessimistic envelopes from the strongest enemy, then takes
+    the worst ``eval_sim_planets`` among them (and the no-injection path).
+    """
+    if par_steps is None:
+        par_steps = steps
+    eid = _primary_enemy_id(state)
+    planets0, fleets0 = _prep_sim_own_launches(state, actions, tempo_floor)
+
+    baseline = _rollout_eval(state, planets0, fleets0, steps)
+    if eid is None:
+        return baseline, baseline
+
+    worst = baseline
+    for key in ("nearest_my", "contest_neutral", "strike_high_prod_my"):
+        p, f = copy_sim(planets0, fleets0)
+        _inject_paranoid_profile(state, p, f, eid, key)
+        worst = min(worst, _rollout_eval(state, p, f, par_steps))
+
+    return baseline, worst
+
+
+def blended_paranoid_sim(
+    state: GameState,
+    actions: List[Tuple[int, int, int]],
+    *,
+    steps: int,
+    tempo_floor: int,
+    par_steps: int,
+    blend: float,
+) -> float:
+    """``base + blend * (pessimistic - base)`` for arbiter blending."""
+    b, pe = score_plan_actions_paranoid(state, actions, steps, tempo_floor,
+                                        par_steps=par_steps)
+    if blend <= 1e-9:
+        return b
+    return b + blend * (pe - b)
 
 
 # ── DefensePlanner ───────────────────────────────────────────────────────────
@@ -1224,11 +1757,7 @@ def _build_capture_plan(snap: Snapshot, mode: str,
     for dst in targets:
         best_sc = -1e18
         for src in state.my_pl:
-            sc, _, _ = target_score(snap, src, dst)
-            # v19: 直接叠加区域内聚加成（同区域星球 +15，跨区域不惩罚）
-            if regional_graph is not None and sc > -1e17:
-                if regional_graph.in_same_region(src.id, dst.id):
-                    sc += 15.0
+            sc, _, _ = capture_edge_score(snap, src, dst, regional_graph)
             if mode == "aggro":
                 sc += recapture_bonus(snap, dst) * 0.5
             if mode == "counter":
@@ -1255,7 +1784,7 @@ def _build_capture_plan(snap: Snapshot, mode: str,
             if avail < ABS_MIN_BATCH:
                 continue
             need, eta = capture_need(state, src, dst)
-            sc, _, _ = target_score(snap, src, dst)
+            sc, _, _ = capture_edge_score(snap, src, dst, regional_graph)
             contributors.append((eta, src, avail, need, sc))
         if not contributors:
             continue
@@ -1327,6 +1856,158 @@ def _build_capture_plan(snap: Snapshot, mode: str,
             1.5 if dst.owner != -1 else 0.9)
 
     return Plan(actions, score, mode)
+
+
+# ╔═══ region 7b: pragmatic action-space UCB ══════════════════════════════════╗
+
+
+class _PragmaticNode:
+    __slots__ = ("action_idx", "parent", "children", "visits", "value", "_untried")
+
+    def __init__(self, action_idx: Optional[int], parent: Optional["_PragmaticNode"], n_choices: int):
+        self.action_idx = action_idx
+        self.parent = parent
+        self.children: List["_PragmaticNode"] = []
+        self.visits = 0
+        self.value = 0.0
+        self._untried = list(range(n_choices))
+
+    def ucb1(self, c: float = 1.35) -> float:
+        if self.visits == 0:
+            return float("inf")
+        if self.parent is None:
+            return self.value / self.visits
+        return (self.value / self.visits +
+                c * math.sqrt(math.log(self.parent.visits) / self.visits))
+
+    def best_child(self, c: float = 1.35) -> "_PragmaticNode":
+        return max(self.children, key=lambda n: n.ucb1(c))
+
+
+def pragmatic_candidate_actions(
+    snap: Snapshot,
+    regional_graph: Optional[RegionalGraph],
+    top_k: int,
+) -> List[Tuple[int, int, int]]:
+    """Top-K single-edge moves ranked by capture_edge_score."""
+    state = snap.state
+    pool: List[Planet] = []
+    seen: Set[int] = set()
+    for p in sorted(state.neu_pl, key=lambda x: (-x.production, -x.ships)):
+        if p.id not in seen:
+            pool.append(p)
+            seen.add(p.id)
+    for p in state.en_pl:
+        if p.id not in seen and (p.ships <= 28 or p.production <= 3):
+            pool.append(p)
+            seen.add(p.id)
+
+    ranked_edges: List[Tuple[float, Tuple[int, int, int]]] = []
+    for dst in pool[:36]:
+        best_sc = -1e18
+        best_pack: Optional[Tuple[int, int, int]] = None
+        for src in state.my_pl:
+            sc, need, _eta = capture_edge_score(snap, src, dst, regional_graph)
+            if sc <= best_sc:
+                continue
+            avail = snap.avail(src.id)
+            if avail < ABS_MIN_BATCH:
+                continue
+            send = min(avail, max(ABS_MIN_BATCH, min(int(need), avail)))
+            if send < ABS_MIN_BATCH:
+                continue
+            best_sc = sc
+            best_pack = (src.id, dst.id, send)
+        if best_pack is not None and best_sc > -31.0:
+            ranked_edges.append((best_sc, best_pack))
+
+    ranked_edges.sort(key=lambda x: -x[0])
+    out: List[Tuple[int, int, int]] = []
+    picked: Set[Tuple[int, int]] = set()
+    for _sc, triple in ranked_edges:
+        sid, did, _ = triple
+        if (sid, did) in picked:
+            continue
+        picked.add((sid, did))
+        out.append(triple)
+        if len(out) >= top_k:
+            break
+    return out
+
+
+class PragmaticActionUCB:
+    """UCB1 over top-K atomic moves; rollout via short score_plan_actions."""
+
+    def __init__(
+        self,
+        state: GameState,
+        snap: Snapshot,
+        regional_graph: Optional[RegionalGraph],
+        candidates: List[Tuple[int, int, int]],
+        budget_ms: float,
+        max_iters: int,
+        rollout_steps: int,
+        tempo_floor: int,
+    ):
+        self.state = state
+        self.snap = snap
+        self.regional_graph = regional_graph
+        self.candidates = candidates
+        self.budget_ms = max(0.0, budget_ms)
+        self.max_iters = max(0, max_iters)
+        self.rollout_steps = max(4, rollout_steps)
+        self.tempo_floor = tempo_floor
+
+    def evaluate(self) -> Tuple[Dict[int, float], Optional[int]]:
+        n = len(self.candidates)
+        if n == 0 or self.budget_ms <= 0 or self.max_iters <= 0:
+            return {}, None
+
+        root = _PragmaticNode(action_idx=None, parent=None, n_choices=n)
+        deadline = time.time() * 1000.0 + self.budget_ms
+        iters = 0
+        while iters < self.max_iters and time.time() * 1000.0 < deadline:
+            if root._untried:
+                idx = root._untried.pop()
+                child = _PragmaticNode(action_idx=idx, parent=root, n_choices=0)
+                root.children.append(child)
+                node = child
+            elif root.children:
+                node = root.best_child()
+            else:
+                break
+
+            act = self.candidates[node.action_idx]
+            val = score_plan_actions(
+                self.state,
+                [act],
+                steps=self.rollout_steps,
+                tempo_floor=self.tempo_floor,
+            )
+            cur: Optional[_PragmaticNode] = node
+            while cur is not None:
+                cur.visits += 1
+                cur.value += val
+                cur = cur.parent
+            iters += 1
+
+        out: Dict[int, float] = {}
+        best_idx_out: Optional[int] = None
+        best_visits = -1
+        best_mean = -1e30
+        for c in root.children:
+            if c.visits <= 0 or c.action_idx is None:
+                continue
+            mean_v = c.value / c.visits
+            out[c.action_idx] = mean_v
+            if c.visits > best_visits or (
+                c.visits == best_visits and mean_v > best_mean
+            ):
+                best_visits = c.visits
+                best_mean = mean_v
+                best_idx_out = c.action_idx
+
+        return out, best_idx_out
 
 
 class ExpandPlanner:
@@ -1832,16 +2513,41 @@ class PlanArbiter:
         if not plans:
             return []
 
-        # 1. Base sim score.
+        # 1. Base sim scores (cheap).
         sim_steps = self.policy.sim_steps
-        base = []
+        base_rows: List[List] = []
+        st = self.snap.state
         for plan in plans:
-            sim_val = score_plan_actions(self.snap.state, plan.actions,
-                                          steps=sim_steps,
-                                          tempo_floor=self.policy.tempo_floor)
-            base.append((plan.score + sim_val, plan))
+            sim_b = score_plan_actions(st, plan.actions,
+                                      steps=sim_steps,
+                                      tempo_floor=self.policy.tempo_floor)
+            base_rows.append([plan.score + sim_b, plan, sim_b])
 
-        base.sort(key=lambda x: -x[0])
+        base_rows.sort(key=lambda r: -r[0])
+
+        # 1b. Optional pessimistic 1-enemy-rollout refinement (timed budget).
+        if (
+            self.policy.paranoid_score_budget_ms >= 18.0
+            and self.policy.paranoid_blend > 1e-6
+        ):
+            t0_par = self.elapsed_ms()
+            lim = max(1, min(self.policy.paranoid_plan_top_k, len(base_rows)))
+            pb = float(self.policy.paranoid_score_budget_ms)
+            blend = float(self.policy.paranoid_blend)
+            psteps = max(4, min(self.policy.paranoid_steps, sim_steps + 8))
+            for i in range(lim):
+                if self.elapsed_ms() - t0_par >= pb:
+                    break
+                s_tot, plan, sim_b = base_rows[i]
+                _, pessim = score_plan_actions_paranoid(
+                    st, plan.actions, sim_steps,
+                    tempo_floor=self.policy.tempo_floor,
+                    par_steps=psteps)
+                adj = sim_b + blend * (pessim - sim_b)
+                base_rows[i][0] = plan.score + adj
+            base_rows.sort(key=lambda r: -r[0])
+
+        base: List[Tuple[float, Plan]] = [(r[0], r[1]) for r in base_rows]
 
         # 2. MCTS bonus on top-3.
         top_k = min(3, len(base))
@@ -1863,13 +2569,44 @@ class PlanArbiter:
                     for idx, v in mcts_vals.items():
                         mcts_bonus[idx] = (v - mu) * 0.5
 
+        prag_bonus: Dict[int, float] = {}
+        if self.policy.pragmatic_mcts_budget_ms > 0 and self.policy.pragmatic_mcts_max_iters > 0:
+            elapsed_p = self.elapsed_ms()
+            rem_p = max(0.0, self.deadline_ms - elapsed_p - 40.0)
+            pbudget = min(self.policy.pragmatic_mcts_budget_ms, rem_p)
+            if pbudget > 22.0:
+                cands = pragmatic_candidate_actions(
+                    self.snap,
+                    self.regional_graph,
+                    self.policy.pragmatic_mcts_top_k,
+                )
+                if cands:
+                    prag = PragmaticActionUCB(
+                        self.snap.state,
+                        self.snap,
+                        self.regional_graph,
+                        cands,
+                        pbudget,
+                        self.policy.pragmatic_mcts_max_iters,
+                        self.policy.pragmatic_mcts_rollout_steps,
+                        self.policy.tempo_floor,
+                    )
+                    means, star_idx = prag.evaluate()
+                    if means and star_idx is not None:
+                        mu_p = sum(means.values()) / len(means)
+                        sid_st, did_st, _ = cands[star_idx]
+                        spread = (means[star_idx] - mu_p) * 0.42
+                        for i, (_, plan) in enumerate(base):
+                            if any(a[0] == sid_st and a[1] == did_st for a in plan.actions):
+                                prag_bonus[i] = spread
+
         # 3. Neural modifier (state-only, applied multiplicatively).
         modifier = self.neural.score_modifier(self.snap.state,
                                               self.policy.neural_modifier_strength)
 
         scored: List[Tuple[float, Plan]] = []
         for i, (s, plan) in enumerate(base):
-            bonus = mcts_bonus.get(i, 0.0)
+            bonus = mcts_bonus.get(i, 0.0) + prag_bonus.get(i, 0.0)
             final = s * modifier + bonus
             scored.append((final, plan))
         scored.sort(key=lambda x: -x[0])
@@ -1885,12 +2622,33 @@ class PlanArbiter:
         if not scored:
             return
         best_score, best_plan = scored[0]
+
+        if (
+            self.regional_graph is not None
+            and self.snap.policy.phase != "early"
+            and best_plan.actions
+        ):
+            threats = [
+                self.regional_graph.region_threat(rid, self.snap.state.en_pl)
+                for rid in self.regional_graph.regions
+            ]
+            max_t = max(threats) if threats else 0.0
+            my_prod = float(sum(p.production for p in self.snap.state.my_pl))
+            rp = float(self.snap.policy.region_pressure_ratio)
+            ssm = float(self.snap.policy.safe_surplus_ship_mult)
+            if max_t > my_prod * rp:
+                budget = self.snap.calculate_safe_surplus_v19(self.regional_graph)
+                ship_sum = sum(a[2] for a in best_plan.actions)
+                if ship_sum > int(budget * ssm) + ABS_MIN_BATCH * 4:
+                    return
+
         # Early phase: always commit - expansion is critical.
         if self.snap.state.phase() != "early":
             baseline = score_plan_actions(self.snap.state, [],
                                           steps=self.policy.sim_steps,
                                           tempo_floor=self.policy.tempo_floor)
-            if best_score <= baseline + 0.1:
+            margin = float(self.snap.policy.baseline_commit_margin)
+            if best_score <= baseline + margin:
                 return
         self._commit_plan(best_plan, urgent=False)
 
@@ -1982,16 +2740,13 @@ def agent(obs, config=None):
         regional_graph = None
         multi_hop_planner = None
         try:
-            if RegionalGraph is not None:
-                # Get spawn positions from config if available (for better regional clustering)
-                spawn_positions = config.get("spawn_positions", []) if config else []
-                regional_graph = RegionalGraph(state.planets, spawn_positions)
-                
-                timeline = ProductionTimeline(state.planets, set(p.id for p in state.my_pl))
-                multi_hop_planner = MultiHopPlanner(regional_graph, timeline)
-        except Exception as e:
-            # Fallback: continue without regional graph (v17-compatible mode)
-            pass
+            spawn_positions = config.get("spawn_positions", []) if config else []
+            regional_graph = RegionalGraph(state.planets, spawn_positions)
+            timeline = ProductionTimeline(state.planets, set(p.id for p in state.my_pl))
+            multi_hop_planner = MultiHopPlanner(regional_graph, timeline)
+        except Exception:
+            regional_graph = None
+            multi_hop_planner = None
 
         arbiter = PlanArbiter(snap, diplo, _GLOBAL_NEURAL,
                               elapsed_ms_fn=elapsed,

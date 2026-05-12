@@ -4,7 +4,13 @@ Conquer planets rotating around a sun in continuous 2D space. A real-time strate
 
 ## This repository (bot)
 
-- **Current default bot:** `submission_v19.py` (+ `submission_v19_regional.py`). Version history and one-line changelog: **[VERSIONS.md](../VERSIONS.md)** at the repo root.
+- **Current default bot:** `submission_v19.py` (self-contained; regional + MCTS helpers inlined). Version notes live in comments / `PHASE_TABLE` sections inside each `submission_v*.py`; older notes in `archive/legacy/docs/`.
+- **Self-play, eval scripts, Kaggle packaging:** **[docs/SELF_PLAY_AND_SUBMISSION.md](docs/SELF_PLAY_AND_SUBMISSION.md)**（自对弈与 RL 管线、`eval_head2head`、`rollout_worker`、`package` 一键流程）。
+- **v19 pessimistic rollout:** Mid/late plans can be reranked using `score_plan_actions_paranoid` (one pessimistic opponent launch heuristic, min over prototypes) with budget `paranoid_score_budget_ms` in `PHASE_TABLE`.
+- **Local strategy profiles:** `ORB_STRATEGY_PROFILE` ContextVar — use `scripts/eval_head2head.py --a v19@rush --b v17` etc. Profiles: `turtle`, `rush`, `expand`, `greedy_prod`, `dual` (see `_STRATEGY_PROFILE_DELTAS` in `submission_v19.py`).
+- **Planet Wars archetypes (PW → OW naming only):** ExpandBot→`expand`, Rage/Bully→`rush`, ProspectorBot→`greedy_prod`, DualBot→`dual`, RandomBot→built-in `random` / noisy RL. Java PW bots cannot run in Orbit Wars; names map to PHASE_TABLE deltas for styled Python opponents / rollouts.
+- **Gate sweeps:** `ORB_REGION_PRESSURE_RATIO`, `ORB_SAFE_SURPLUS_SHIP_MULT`, `ORB_BASELINE_COMMIT_MARGIN` env vars override numeric gates per process; helper `tools/sweep_commit_gates.py`.
+- **Rollout mix:** `tools/rollout_worker.py --opponent-mix "self:0.5,v13:0.3,v19@turtle:0.2"` (tokens `self`, `random`, `vNN`, `v19@profile`).
 - **Older submissions and agent notes:** `archive/legacy/submissions/`, `archive/legacy/docs/` — see `archive/legacy/README.md`.
 
 ## Overview
