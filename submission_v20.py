@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
-from scipy.cluster.hierarchy import fclusterdata
+
+try:
+    from scipy.cluster.hierarchy import fclusterdata as _scipy_fclusterdata
+except ImportError:  # noqa: SIM105 — Kaggle notebook/kernel 常无 scipy，仅保证可导入
+    _scipy_fclusterdata = None  # type: ignore[misc, assignment]
 
 # Set by eval / rollout wrappers (`v20@rush`); Kaggle never touches this.
 ORB_STRATEGY_PROFILE: ContextVar[Optional[str]] = ContextVar(
@@ -47,7 +51,16 @@ SYNC_ETA_WINDOW = 5
 SYNC_ETA_WINDOW_MAX = 26
 MAX_SOURCES_PER_TARGET = 8
 MAX_TARGETS_PER_PLAN = 3      # 集中力量：最多同时打3个目标
+# expand/balanced：己方星球很少时，禁止同一出兵星在本 plan 里打两个不同目标（避免 8+12 拆开浪费）。
+ONE_OUTBOUND_DST_PER_SOURCE_UNTIL_N_WORLDS = 3
 ABS_MIN_BATCH = 8  # 提高下限减少碎片化小舰队（配合 early 略降 growth_lock）
+# Expand / balanced: edge scores below this were dropped from ranked targets — too
+# aggressive vs regional cross-zone tax; leaves fat planets idle on contested greys.
+EXPAND_RANK_SCORE_FLOOR = -44.0
+# Neutral + is_safe_investment False: still try capture if pooled surplus is huge
+# (first wave failed vs orange but HQ stack is still rich).
+NEUTRAL_BRUTE_SLACK_MUL = 2
+NEUTRAL_BRUTE_SLACK_MIN = 52
 # First step / solo HQ: cap reserve so opening can peel ~ships+1 vs neutral-20
 # (symmetric ladder seeds; see tools/sim_first_turn_opening.py).
 OPENING_FIRST_CAPTURE_SEND = 21
@@ -62,6 +75,11 @@ OPENING_SOLO_HQ_RESERVE_LAST_STEP = 48
 # this biases the bot toward proximate, certain gains.
 HORIZON_TURNS = 60
 ENEMY_SHIP_PEN_COEFF = 0.0008  # tiny - only breaks ties
+
+# Orbital distance (initial) from sun for “four inner clusters” on symmetric ladder
+# maps. Used to garrison and avoid stripping these worlds while they rotate into
+# enemy arcs (user: clockwise → need mass, not dribbling to passing neutrals).
+INNER_SUN_BELT_R = 33.0
 
 
 def _get(obj, key, default=None):
@@ -148,7 +166,11 @@ class RegionalGraph:
 
         coords = np.array([[p.x, p.y] for p in planets])
         try:
-            cluster_labels = fclusterdata(coords, t=4, criterion="maxclust", method="complete")
+            if _scipy_fclusterdata is None:
+                raise RuntimeError("scipy not available")
+            cluster_labels = _scipy_fclusterdata(
+                coords, t=4, criterion="maxclust", method="complete"
+            )
             self._build_regions(cluster_labels, spawn_positions)
         except Exception:
             self._build_regions_fallback(spawn_positions)
@@ -572,32 +594,50 @@ class GameState:
         return max(0, p.ships - out)
 
 
+def is_sun_belt_planet(state: GameState, p: Planet) -> bool:
+    """Inner rotating ring around the sun (not comets, not static far-outs)."""
+    if p.is_comet or not state.is_orbiting(p):
+        return False
+    r0 = math.hypot(p.initial_x - SUN_X, p.initial_y - SUN_Y)
+    return r0 + float(p.radius) <= INNER_SUN_BELT_R
+
+
 # ╔═══ region 3: Snapshot & geometry ════════════════════════════════════════╗
 
 def lead_intercept(state: GameState, src: Planet, dst: Planet, ships: int,
-                   iters: int = 8) -> Tuple[float, float, int]:
-    """Iteratively converge on the intercept point (tx, ty) and ETA.
+                   iters: int = 12) -> Tuple[float, float, int, float]:
+    """Iteratively converge on intercept of ``dst`` **disk center** from ``src``.
 
-    v15: after convergence, clamp (tx, ty) to [1, 99] so the target point is
-    always inside the board. This prevents safe_aim from receiving an OOB
-    target and then computing a nonsensical deflection angle.
+    Each step uses ``launch_origin`` (rim + ENGINE_LAUNCH_PAD) as the true start,
+    so bearing/ETA match the engine and moving orbit targets get a proper lead
+    (提前量). Orbiting, non-comet targets apply ``ORBIT_AIM_LEAD_STEPS`` to push
+    the aim along orbit after convergence (often ~1–2t earlier contact). Returns
+    ``(tx, ty, eta, aim_angle)`` where ``aim_angle`` is from rim toward the
+    predicted center.
     """
     spd = fleet_speed(max(1, ships), state.max_speed)
-    tx, ty = dst.x, dst.y
-    eta = max(1, int(math.ceil(math.hypot(tx - src.x, ty - src.y) / spd)))
-    for _ in range(iters):
+    eta = max(1, int(math.ceil(math.hypot(dst.x - src.x, dst.y - src.y) / spd)))
+    angle = math.atan2(dst.y - src.y, dst.x - src.x)
+    n = max(iters, 10)
+    for _ in range(n):
         tx, ty = state.planet_pos_at(dst, eta)
-        new_eta = max(1, int(math.ceil(math.hypot(tx - src.x, ty - src.y) / spd)))
-        if new_eta == eta:
+        lx, ly = launch_origin(src, angle)
+        dist = math.hypot(tx - lx, ty - ly)
+        new_eta = max(1, int(math.ceil(dist / spd))) if dist > 1e-9 else 1
+        new_angle = math.atan2(ty - ly, tx - lx)
+        if new_eta == eta and abs(new_angle - angle) < 1e-4:
             break
         eta = new_eta
-    # v15: clamp target to board interior so callers never receive OOB coords.
+        angle = new_angle
+    lead = ORBIT_AIM_LEAD_STEPS if (state.is_orbiting(dst) and not dst.is_comet) else 0
+    tx, ty = state.planet_pos_at(dst, eta + lead)
     _MARGIN = 1.0
     tx = max(_MARGIN, min(BOARD - _MARGIN, tx))
     ty = max(_MARGIN, min(BOARD - _MARGIN, ty))
-    # Recompute eta after clamp (distance may have changed slightly).
-    eta = max(1, int(math.ceil(math.hypot(tx - src.x, ty - src.y) / spd)))
-    return tx, ty, eta
+    lx, ly = launch_origin(src, angle)
+    angle = math.atan2(ty - ly, tx - lx)
+    eta = max(1, int(math.ceil(math.hypot(tx - lx, ty - ly) / spd)))
+    return tx, ty, eta, angle
 
 
 def _ray_safe(sx: float, sy: float, angle: float, spd: float, min_flight: int = 0) -> bool:
@@ -622,6 +662,9 @@ def _ray_safe(sx: float, sy: float, angle: float, spd: float, min_flight: int = 
 LAUNCH_SIM_MAX_STEPS = 220
 # Must match kaggle_environments/envs/orbit_wars/orbit_wars.py fleet spawn.
 ENGINE_LAUNCH_PAD = 0.1
+# Discrete ETA + rim spawn tends to under-lead orbiting neutrals; nudge the aim
+# point forward along orbit so fleets meet the center ~1–2 steps earlier in practice.
+ORBIT_AIM_LEAD_STEPS = 2
 
 
 def launch_origin(src: Planet, angle: float) -> Tuple[float, float]:
@@ -630,7 +673,7 @@ def launch_origin(src: Planet, angle: float) -> Tuple[float, float]:
     return src.x + math.cos(angle) * r, src.y + math.sin(angle) * r
 
 
-def launch_hits_target_first(
+def launch_intercept_step(
     state: GameState,
     src_x: float,
     src_y: float,
@@ -639,12 +682,8 @@ def launch_hits_target_first(
     target_id: int,
     max_steps: int = LAUNCH_SIM_MAX_STEPS,
     ignore_planet_id: Optional[int] = None,
-) -> bool:
-    """True iff the first planetary contact (orbit_wars swept collision order) is target_id.
-
-    Uses the same relative-motion segment test as the official environment, not
-    a frozen planet at integer steps.
-    """
+) -> Optional[int]:
+    """First simulation step (1-based) where fleet hits ``target_id``, else None."""
     spd = fleet_speed(max(1, int(ships)), state.max_speed)
     cx, cy = float(src_x), float(src_y)
     cos_a = math.cos(angle)
@@ -664,62 +703,104 @@ def launch_hits_target_first(
                 hit_id = p.id
                 break
         if hit_id is not None:
-            return hit_id == target_id
+            return k if hit_id == target_id else None
         if not (0.0 <= fx1 <= BOARD and 0.0 <= fy1 <= BOARD):
-            return False
+            return None
         if point_segment_distance(SUN_X, SUN_Y, fx0, fy0, fx1, fy1) < SUN_RADIUS:
-            return False
+            return None
         cx, cy = fx1, fy1
-    return False
+    return None
+
+
+def launch_hits_target_first(
+    state: GameState,
+    src_x: float,
+    src_y: float,
+    angle: float,
+    ships: int,
+    target_id: int,
+    max_steps: int = LAUNCH_SIM_MAX_STEPS,
+    ignore_planet_id: Optional[int] = None,
+) -> bool:
+    """True iff the first planetary contact (orbit_wars swept collision order) is target_id.
+
+    Uses the same relative-motion segment test as the official environment, not
+    a frozen planet at integer steps.
+    """
+    return launch_intercept_step(
+        state, src_x, src_y, angle, ships, target_id,
+        max_steps=max_steps, ignore_planet_id=ignore_planet_id,
+    ) is not None
 
 
 def safe_aim(state: GameState, src: Planet, dst: Planet, ships: int) -> Tuple[float, int]:
-    """Return (angle, eta). Prefers angles that actually intercept `dst` from rim spawn.
+    """Return (angle, eta). Pick rim bearing with **earliest** stepped intercept.
 
-    Among candidates that pass coarse `_ray_safe` from planet center, pick the
-    first whose stepped trajectory (from `launch_origin`) hits `dst` before OOB
-    or sun. Falls back to legacy first-_ray_safe-only behavior if none qualify
-    so callers can still attempt emit (final gate in `_emit`).
+    Orbits can admit two families of feasible shots (short meet vs long chase).
+    Taking the first passing candidate used to lock in the slow clockwise chase;
+    we now minimize intercept time so fleets prefer the short arc (user: CCW vs CW).
     """
     nships = max(1, int(ships))
     spd = fleet_speed(nships, state.max_speed)
-    tx, ty, eta = lead_intercept(state, src, dst, nships)
+    tx, ty, eta_hint, angle0 = lead_intercept(state, src, dst, nships)
     tx = max(1.0, min(BOARD - 1.0, tx))
     ty = max(1.0, min(BOARD - 1.0, ty))
-    angle0 = math.atan2(ty - src.y, tx - src.x)
+    lx0, ly0 = launch_origin(src, angle0)
+    angle0 = math.atan2(ty - ly0, tx - lx0)
     tid = dst.id
 
-    def _qualifies(a: float) -> bool:
-        if not _ray_safe(src.x, src.y, a, spd, min_flight=eta):
-            return False
-        lx, ly = launch_origin(src, a)
-        return launch_hits_target_first(
-            state, lx, ly, a, nships, tid,
-            max_steps=LAUNCH_SIM_MAX_STEPS, ignore_planet_id=None)
+    deltas = (0.15, -0.15, 0.30, -0.30, 0.50, -0.50, 0.75, -0.75,
+              1.05, -1.05, 1.40, -1.40, 1.80, -1.80, 2.20, -2.20,
+              2.60, -2.60, 2.85, -2.85, 3.00, -3.00, 3.02, -3.02,
+              3.14, -3.14)
+    cands: List[float] = [angle0, angle0 + math.pi]
+    for d in deltas:
+        cands.append(angle0 + d)
 
-    candidates: List[float] = [angle0]
-    for delta in (0.15, -0.15, 0.30, -0.30, 0.50, -0.50, 0.75, -0.75,
-                  1.05, -1.05, 1.40, -1.40, 1.80, -1.80, 2.20, -2.20,
-                  2.60, -2.60, 2.85, -2.85, 3.00, -3.00, 3.02, -3.02,
-                  3.14, -3.14):
-        candidates.append(angle0 + delta)
+    def best_from_pool(pool: List[float], min_flight: int) -> Optional[Tuple[float, int]]:
+        best_s: Optional[int] = None
+        best_a: Optional[float] = None
+        mf = max(1, min_flight)
+        for a in pool:
+            lx, ly = launch_origin(src, a)
+            if not _ray_safe(lx, ly, a, spd, min_flight=mf):
+                continue
+            st = launch_intercept_step(
+                state, lx, ly, a, nships, tid,
+                max_steps=LAUNCH_SIM_MAX_STEPS, ignore_planet_id=None)
+            if st is None:
+                continue
+            if best_s is None or st < best_s:
+                best_s, best_a = st, a
+        if best_a is None or best_s is None:
+            return None
+        return best_a, int(best_s)
 
-    for a in candidates:
-        if _qualifies(a):
-            return a, eta
+    got = best_from_pool(cands, 1)
+    if got is not None:
+        return got
+
+    got = best_from_pool(cands, max(1, eta_hint - 1))
+    if got is not None:
+        return got
 
     safe_corners = [(2.0, 2.0), (2.0, 98.0), (98.0, 2.0), (98.0, 98.0)]
     corner = max(safe_corners, key=lambda c: math.hypot(c[0] - src.x, c[1] - src.y))
     ca = math.atan2(corner[1] - src.y, corner[0] - src.x)
-    if _qualifies(ca):
-        return ca, eta
+    got = best_from_pool([ca], max(1, eta_hint - 1))
+    if got is not None:
+        return got
 
-    # Legacy fallback (may fail `_emit`'s trajectory gate).
-    for a in candidates:
-        if _ray_safe(src.x, src.y, a, spd, min_flight=eta):
-            return a, eta
-    if _ray_safe(src.x, src.y, ca, spd, min_flight=eta):
-        return ca, eta
+    for a in cands:
+        lx, ly = launch_origin(src, a)
+        if _ray_safe(lx, ly, a, spd, min_flight=max(1, eta_hint - 1)):
+            return a, int(eta_hint)
+    lx_ca, ly_ca = launch_origin(src, ca)
+    if _ray_safe(lx_ca, ly_ca, ca, spd, min_flight=max(1, eta_hint - 1)):
+        return ca, int(eta_hint)
+    return angle0, int(eta_hint)
+
+
 def target_state_at(state: GameState, dst: Planet, eta: int) -> Tuple[int, int]:
     """Project (owner, ships) of `dst` after `eta` turns including in-flight arrivals."""
     owner = dst.owner
@@ -736,6 +817,28 @@ def target_state_at(state: GameState, dst: Planet, eta: int) -> Tuple[int, int]:
     return owner, max(0, ships)
 
 
+def my_inbound_ships_to(state: GameState, planet_id: int) -> int:
+    """Our fleets already in flight toward ``planet_id`` (obs snapshot)."""
+    s = 0
+    mi = state.my_id
+    for f in state.fleets:
+        if f.owner != mi:
+            continue
+        t = state.fleet_target.get(f.id)
+        if t is not None and t[0] == planet_id:
+            s += f.ships
+    return int(s)
+
+
+def neutral_wave_wins(state: GameState, dst: Planet, eta: int,
+                       send: int, other_my_inbound: int) -> bool:
+    """True if ``send`` + inbound allies strictly beats projected grey garrison at eta."""
+    if dst.owner != -1:
+        return True
+    _, gar = target_state_at(state, dst, eta)
+    return (send + other_my_inbound) > gar
+
+
 def capture_need(state: GameState, src: Planet, dst: Planet,
                  margin: Optional[int] = None) -> Tuple[int, int]:
     """Iterative estimate of (need, eta) to capture dst from src."""
@@ -747,7 +850,7 @@ def capture_need(state: GameState, src: Planet, dst: Planet,
     need = max(ABS_MIN_BATCH, dst.ships + pad0)
     eta = 1
     for _ in range(4):
-        _, _, eta = lead_intercept(state, src, dst, need)
+        _, _, eta, _ = lead_intercept(state, src, dst, need)
         owner, ships = target_state_at(state, dst, eta)
         if owner == state.my_id:
             need = max(ABS_MIN_BATCH, state.net_threat(dst) + 4)
@@ -784,6 +887,8 @@ class Snapshot:
     # Only includes planets where an enemy fleet is in-flight and will arrive
     # within THREAT_HORIZON_WINDOW turns.
     threat_horizon: Dict[int, int] = field(default_factory=dict)
+    # Same-turn commits toward grey id (obs does not yet list our launched fleets).
+    pending_neutral_wave: Dict[int, int] = field(default_factory=dict)
 
     @classmethod
     def build(cls, state: GameState, policy: "PhasePolicy") -> "Snapshot":
@@ -834,7 +939,24 @@ class Snapshot:
         # Window expanded from 3 to 8 in v14 for earlier reinforcement.
         horizon_eta = self.threat_horizon.get(p.id, 999)
         if horizon_eta <= 8 and p.production >= 3:
-            base = max(base, p.ships + p.production * min(horizon_eta, 4))
+            # Enemy fleet targeting us soon — keep extra pad, but do NOT lock the
+            # entire stack (old ``ships + prod*eta`` made reserve > ships → surplus 0).
+            proactive = (threat + p.production * min(horizon_eta, 4)
+                         + 6 + max(0, 10 - horizon_eta))
+            base = max(base, proactive)
+
+        # Inner sun belt: multi-planet — hoard before rotation carries us into enemy.
+        if (
+            len(s.my_pl) >= 2
+            and is_sun_belt_planet(s, p)
+            and not p.is_comet
+        ):
+            en_belt = any(is_sun_belt_planet(s, e) for e in s.en_pl)
+            if en_belt or s.phase() != "early":
+                belt_pad = 8 + p.production * 5
+                if s.phase() in ("mid", "late"):
+                    belt_pad += 8
+                base = max(base, threat + belt_pad)
 
         if (
             self.state.phase() == "early"
@@ -1191,11 +1313,40 @@ def approach_bonus(snap: Snapshot, dst: Planet, eta: int) -> float:
     return max(-28.0, min(34.0, gain * snap.policy.approach_weight + dst.production * 1.2))
 
 
+def orbit_arc_strategic_score(state: GameState, dst: Planet, eta: int) -> float:
+    """Prefer targets that, by arrival time, drift toward our mass / away from enemy.
+
+    Penalizes chasing passing neutrals that rotate into the opponent's arc (user:
+    「占了也快进对面半场 = 白给」).
+    """
+    if dst.is_comet or not state.is_orbiting(dst):
+        return 0.0
+    if not state.en_pl or not state.my_pl:
+        return 0.0
+    t = max(1, min(int(eta), 56))
+    fx, fy = state.planet_pos_at(dst, t)
+    now_d_my = min(dst.dist(m) for m in state.my_pl)
+    fut_d_my = min(
+        math.hypot(fx - state.planet_pos_at(m, t)[0], fy - state.planet_pos_at(m, t)[1])
+        for m in state.my_pl
+    )
+    now_d_en = min(dst.dist(e) for e in state.en_pl)
+    fut_d_en = min(
+        math.hypot(fx - state.planet_pos_at(e, t)[0], fy - state.planet_pos_at(e, t)[1])
+        for e in state.en_pl
+    )
+    # Positive: closing on our worlds. Positive toward_en_closing: closing on enemy (bad).
+    toward_us = now_d_my - fut_d_my
+    toward_en_closing = now_d_en - fut_d_en
+    raw = 1.18 * toward_us - 1.52 * max(0.0, toward_en_closing)
+    return max(-46.0, min(52.0, raw))
+
+
 def enemy_eta_power(state: GameState, dst: Planet) -> Tuple[int, int]:
     best_eta, best_power = 999, 0
     for e in state.en_pl:
         probe = max(1, min(e.ships, max(5, e.ships * 2 // 3)))
-        _, _, eta = lead_intercept(state, e, dst, probe)
+        _, _, eta, _ = lead_intercept(state, e, dst, probe)
         if eta < best_eta:
             best_eta, best_power = eta, e.ships
     return best_eta, best_power
@@ -1234,10 +1385,12 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     if need <= 0:
         return -1e18, 0, eta
 
-    # 路径穿越太阳？直接判死——绝不跨日远征
+    # 球心连线擦过太阳：启发式上偏难，但弹道可从边缘绕行（见 _emit / safe_aim）。
+    # 旧逻辑直接 -1e18 使内环球长期进不了排序；改为扣分，交给真轨迹门。
+    sun_detour_pen = 0.0
     sun_dist = point_segment_distance(SUN_X, SUN_Y, src.x, src.y, dst.x, dst.y)
     if sun_dist < SUN_RADIUS + SUN_PATH_MARGIN:
-        return -1e18, need, eta
+        sun_detour_pen = 42.0 + eta * 0.30
 
     raw_turns = max(1, state.turns_left() - eta)
     turns = min(raw_turns, HORIZON_TURNS)
@@ -1276,8 +1429,10 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     elif dst.production >= 1:
         prod_bonus = dst.production * 2.0
 
-    # 敌方星球额外价值（夺取=削弱对手+增强自己）
+    # 敌方星球额外价值（夺取=削弱对手+增强自己）；贴身弱敌强推（expand 曾漏掉 >20 驻军的邻球）
     enemy_bonus = 30.0 if is_en else 0.0
+    if is_en and src.dist(dst) < 20.0:
+        enemy_bonus += 35.0
     comet_bonus = 12.0 if dst.is_comet else 0.0
     rec_bonus = recapture_bonus(snap, dst)
     # Early race for big factories: nudge expand ordering toward prod>=4 neutrals.
@@ -1314,11 +1469,35 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     if is_neu and state.phase() == "early" and dst.production <= 1:
         mite_neutral_pen = 38.0
 
+    orbit_arc = 0.0
+    approach_adj = 0.0
+    fat_local_neu = 0.0
+    finish_neu = 0.0
+    if is_neu:
+        if state.en_pl:
+            orbit_arc = orbit_arc_strategic_score(state, dst, eta)
+            approach_adj = 0.48 * approach_bonus(snap, dst, eta)
+        if dst.ships >= 38:
+            d_anchor = min(dst.dist(m) for m in state.my_pl)
+            if d_anchor < 36.0:
+                # 身边大灰（如 59）：优先吃近处高驻军工厂，少去追「路过」小灰
+                fat_local_neu = 16.0 + (36.0 - d_anchor) * 1.65 + min(22.0, dst.ships * 0.08)
+        oth = my_inbound_ships_to(state, dst.id)
+        if oth > 0 and oth <= dst.ships + 4:
+            # 已有己方舰队在途但未够占领：优先补刀，避免下回合改打远处浪费产兵
+            gap = (dst.ships + 1) - oth
+            if 1 <= gap <= 18:
+                finish_neu = 52.0 + (18 - gap) * 1.5
+
     score = (
         prod_value + prod_bonus + enemy_bonus + comet_bonus + rec_bonus
-        + early_hot_neutral + neutral_mfg
+        + early_hot_neutral + neutral_mfg + fat_local_neu + finish_neu
+        + orbit_arc + approach_adj
     ) * distance_decay
-    score -= cost_pen + snipe_pen + mite_neutral_pen
+    score -= cost_pen + snipe_pen + mite_neutral_pen + sun_detour_pen
+    # 内环球中立：战略优先级（旋转进对手弧前须占）
+    if is_neu and is_sun_belt_planet(state, dst):
+        score += 38.0 * distance_decay
     return score, need, eta
 
 
@@ -1357,6 +1536,8 @@ def regional_capture_adjustment(
         return bonus - dist_cost * 0.35
 
     cross = 10.0 + 0.045 * float(eta * eta)
+    if is_sun_belt_planet(state, dst) and dst.owner == -1:
+        cross *= 0.38
     return -cross - dist_cost
 
 
@@ -1767,7 +1948,7 @@ class InterceptPlanner:
                 avail = max(0, snap.avail(src.id) - local_used[src.id])
                 if avail < ABS_MIN_BATCH:
                     continue
-                _, _, eta = lead_intercept(state, src, dst, min(avail, need))
+                _, _, eta, _ = lead_intercept(state, src, dst, min(avail, need))
                 if eta > eta_to_planet + 1:
                     continue
                 send = min(avail, need)
@@ -1788,7 +1969,17 @@ def _target_pool(state: GameState, mode: str,
                  diplo: Optional["DiplomacyEngine"] = None) -> List[Planet]:
     if mode == "expand":
         neu = sorted(state.neu_pl, key=lambda p: (-p.production, -p.ships))
-        return neu + [p for p in state.en_pl if p.ships <= 20 or p.production <= 2]
+        # v20: 旧阈值 ships<=20 会漏掉邻接「26~40兵+3产」等可吃口袋，表现为一格之隔从不打。
+        soft_en: List[Planet] = []
+        for p in state.en_pl:
+            if p.ships <= 20 or p.production <= 2:
+                soft_en.append(p)
+                continue
+            if state.phase() != "early":
+                eg = state.effective_garrison(p)
+                if eg <= 44 and p.ships <= 52:
+                    soft_en.append(p)
+        return neu + soft_en
     if mode == "aggro":
         return sorted(state.en_pl,
                       key=lambda p: (state.effective_garrison(p) - p.production * 5,
@@ -1820,6 +2011,8 @@ def _build_capture_plan(snap: Snapshot, mode: str,
 
     # Rank.
     ranked: List[Tuple[float, Planet]] = []
+    # Rank (aggro/counter/diplo keep tight floor; expand/balanced need looser floor).
+    rank_floor = EXPAND_RANK_SCORE_FLOOR if mode in ("expand", "balanced") else -31.0
     for dst in targets:
         best_sc = -1e18
         for src in state.my_pl:
@@ -1834,9 +2027,15 @@ def _build_capture_plan(snap: Snapshot, mode: str,
                 sc += diplo.leader_penalty(dst)
             if sc > best_sc:
                 best_sc = sc
-        if best_sc > -31.0:
+        if best_sc > rank_floor:
             ranked.append((best_sc, dst))
     ranked.sort(key=lambda x: -x[0])
+
+    source_dst_lock: Dict[int, int] = {}
+    split_lock = (
+        mode in ("expand", "balanced")
+        and len(state.my_pl) <= ONE_OUTBOUND_DST_PER_SOURCE_UNTIL_N_WORLDS
+    )
 
     for _, dst in ranked[:MAX_TARGETS_PER_PLAN]:
         if len(actions) >= MAX_TOTAL_MOVES or dst.id in target_done:
@@ -1873,8 +2072,22 @@ def _build_capture_plan(snap: Snapshot, mode: str,
                 continue
 
         contributors: List[Tuple[int, Planet, int, int, float]] = []
+        en_belt = any(is_sun_belt_planet(state, e) for e in state.en_pl)
         for src in state.my_pl:
+            if split_lock:
+                locked_d = source_dst_lock.get(src.id)
+                if locked_d is not None and locked_d != dst.id:
+                    continue
             avail = max(0, snap.avail(src.id) - local_used[src.id])
+            # Do not strip inner sun-belt planets for outer “passing” neutrals once
+            # the mid-game contest starts (rotation drags these into enemy arcs).
+            if mode in ("expand", "balanced") and is_sun_belt_planet(state, src):
+                if dst.owner == -1 and not is_sun_belt_planet(state, dst):
+                    if len(state.my_pl) >= 2 and (en_belt or state.phase() != "early"):
+                        hoard = 14 + src.production * 5
+                        if state.phase() in ("mid", "late"):
+                            hoard += 8
+                        avail = max(0, avail - hoard)
             # v14: lowered threshold to ABS_MIN_BATCH (was max(ABS_MIN_BATCH, prod*2))
             # so all planets with any surplus can join coordinated captures.
             if avail < ABS_MIN_BATCH:
@@ -1903,7 +2116,14 @@ def _build_capture_plan(snap: Snapshot, mode: str,
             # v16: garrison uses fastest arrival; enemy production uses (group-min) gap.
             if dst.owner == -1 and group_eta > 3 and not snap.is_safe_investment(
                     dst, group_eta):
-                break
+                slack_pool = sum(
+                    max(0, snap.avail(p.id) - local_used[p.id]) for p in state.my_pl)
+                brute_need = max(
+                    NEUTRAL_BRUTE_SLACK_MIN,
+                    int(dst.ships * NEUTRAL_BRUTE_SLACK_MUL + dst.production * 6 + 24),
+                )
+                if slack_pool < brute_need:
+                    break
             owner, garrison = target_state_at(state, dst, min_eta)
             if owner == state.my_id:
                 break
@@ -1955,6 +2175,8 @@ def _build_capture_plan(snap: Snapshot, mode: str,
         for sid, did, send in staged_ok:
             actions.append((sid, did, send))
             local_used[sid] += send
+            if split_lock:
+                source_dst_lock[sid] = dst.id
         target_done.add(dst.id)
         score += sum(c[4] for c in group_used[:len(staged_ok)]) + required_ok * (
             1.5 if dst.owner != -1 else 0.9)
@@ -2022,7 +2244,7 @@ def pragmatic_candidate_actions(
                 continue
             best_sc = sc
             best_pack = (src.id, dst.id, send)
-        if best_pack is not None and best_sc > -31.0:
+        if best_pack is not None and best_sc > EXPAND_RANK_SCORE_FLOOR:
             ranked_edges.append((best_sc, best_pack))
 
     ranked_edges.sort(key=lambda x: -x[0])
@@ -2251,7 +2473,20 @@ class RedistributionPlanner:
         ordered = sorted(state.my_pl, key=ned)
         fc = max(1, min(len(ordered) - 1, len(ordered) // 2 + 1))
         fronts = ordered[:fc]
-        rears = [p for p in ordered[fc:] if state.net_threat(p) <= 0]
+        en_belt = any(is_sun_belt_planet(state, e) for e in state.en_pl)
+        rears = []
+        for p in ordered[fc:]:
+            if state.net_threat(p) > 0:
+                continue
+            if is_sun_belt_planet(state, p) and (
+                en_belt or state.phase() != "early"
+            ):
+                # Belt rears are usually reserves for rotation — but huge stacks
+                # must still feed fronts when strategic commit is capped.
+                stack = max(0, snap.surplus.get(p.id, 0))
+                if stack < 52:
+                    continue
+            rears.append(p)
         actions: List[Tuple[int, int, int]] = []
         local_used: Dict[int, int] = defaultdict(int)
         for rear in rears[:3]:
@@ -2717,6 +2952,21 @@ class PlanArbiter:
         scored.sort(key=lambda x: -x[0])
         return scored
 
+    def _trim_plan_to_ship_budget(self, plan: Plan, max_total: int) -> Plan:
+        """Shrink planned sends to at most ``max_total`` ships (greedy prefix)."""
+        if max_total < ABS_MIN_BATCH or not plan.actions:
+            return Plan([], plan.score, plan.tag, urgent=plan.urgent)
+        remain = int(max_total)
+        out: List[Tuple[int, int, int]] = []
+        for sid, did, ships in plan.actions:
+            if remain < ABS_MIN_BATCH:
+                break
+            take = min(int(ships), remain)
+            if take >= ABS_MIN_BATCH:
+                out.append((sid, did, take))
+                remain -= take
+        return Plan(out, plan.score, plan.tag, urgent=plan.urgent)
+
     def commit_best(self, scored: List[Tuple[float, Plan]]) -> None:
         """Commit the single best strategic plan only, gated by position eval.
 
@@ -2743,9 +2993,14 @@ class PlanArbiter:
             ssm = float(self.snap.policy.safe_surplus_ship_mult)
             if max_t > my_prod * rp:
                 budget = self.snap.calculate_safe_surplus_v20(self.regional_graph)
+                limit = int(budget * ssm) + ABS_MIN_BATCH * 4
                 ship_sum = sum(a[2] for a in best_plan.actions)
-                if ship_sum > int(budget * ssm) + ABS_MIN_BATCH * 4:
-                    return
+                if ship_sum > limit:
+                    trimmed = self._trim_plan_to_ship_budget(best_plan, limit)
+                    if not trimmed.actions:
+                        return
+                    best_plan = trimmed
+                    best_score = trimmed.score
 
         # Early phase: always commit - expansion is critical.
         if self.snap.state.phase() != "early":
@@ -2753,7 +3008,16 @@ class PlanArbiter:
                                           steps=self.policy.sim_steps,
                                           tempo_floor=self.policy.tempo_floor)
             margin = float(self.snap.policy.baseline_commit_margin)
-            if best_score <= baseline + margin:
+            commit_bonus = 0.0
+            st0 = self.snap.state
+            if best_plan.tag in ("expand", "balanced") and best_plan.actions:
+                if any(
+                    st0.get(a[1]) is not None and st0.get(a[1]).owner == -1
+                    for a in best_plan.actions
+                ):
+                    # Short-horizon sim often punishes sends vs contested grey; avoid idle 50+ stacks.
+                    commit_bonus = 6.0
+            if best_score + commit_bonus <= baseline + margin:
                 return
         self._commit_plan(best_plan, urgent=False)
 
@@ -2780,10 +3044,6 @@ class PlanArbiter:
         if src is None or dst is None or src.owner != state.my_id:
             return False
 
-        # 硬性拦截 1: src→dst 直线穿日？绝不发兵
-        if point_segment_distance(SUN_X, SUN_Y, src.x, src.y, dst.x, dst.y) < SUN_RADIUS + SUN_PATH_MARGIN:
-            return False
-
         if urgent:
             cap = max(0, src.ships - ABS_MIN_BATCH - snap.used.get(sid, 0))
         else:
@@ -2799,22 +3059,35 @@ class PlanArbiter:
                 retry_sends.append(s2)
 
         direct_angle = math.atan2(dst.y - src.y, dst.x - src.x)
+        chord_clips_sun = (
+            point_segment_distance(SUN_X, SUN_Y, src.x, src.y, dst.x, dst.y)
+            < SUN_RADIUS + SUN_PATH_MARGIN
+        )
+        ang_tol = 1.55 if chord_clips_sun else 1.20
         for send in retry_sends:
             angle, eta = safe_aim(state, src, dst, send)
             spd = fleet_speed(send, state.max_speed)
-            if not _ray_safe(src.x, src.y, angle, spd, min_flight=eta):
+            lx0, ly0 = launch_origin(src, angle)
+            if not _ray_safe(lx0, ly0, angle, spd, min_flight=max(1, eta - 1)):
                 continue
             angle_diff = abs(angle - direct_angle)
             if angle_diff > math.pi:
                 angle_diff = 2 * math.pi - angle_diff
-            if angle_diff > 1.2:
+            if angle_diff > ang_tol:
                 continue
             lx, ly = launch_origin(src, angle)
             if not launch_hits_target_first(state, lx, ly, angle, send, did,
                                             ignore_planet_id=None):
                 continue
+            if dst.owner == -1 and not urgent:
+                queued = snap.pending_neutral_wave.get(did, 0)
+                oth = my_inbound_ships_to(state, did) + queued
+                if not neutral_wave_wins(state, dst, eta, send, oth):
+                    continue
             self.moves.append([sid, float(angle), int(send)])
             snap.subtract(sid, send)
+            if dst.owner == -1:
+                snap.pending_neutral_wave[did] = snap.pending_neutral_wave.get(did, 0) + send
             return True
         return False
 

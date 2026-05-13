@@ -1,0 +1,26 @@
+{
+  "cumulative_train_sec": 7728.157853126526,
+  "last_row": {
+    "ts": "2026-05-13T11:53:55.086880Z",
+    "iter": 5,
+    "iter_wall_sec": 1489.794,
+    "cumulative_train_sec": 7728.158,
+    "tier": "lite",
+    "submission": "v20",
+    "lr": 0.0003,
+    "games_this_iter": 48,
+    "transitions": 10898,
+    "policy_loss": 0.10145665146410465,
+    "value_loss": 0.0447122228021423,
+    "entropy": -0.00443814826818804,
+    "cpu_pct": 0.0,
+    "ram_used_pct": 5.7,
+    "ram_used_gb": 2.042,
+    "gpu_util_pct": 1.0,
+    "gpu_mem_used_mb": 2.0,
+    "gpu_mem_total_mb": 32607.0,
+    "mean_final_my_ship_ratio": 0.556888485327363,
+    "mean_final_planet_ratio": 0.5106770843267441,
+    "mean_last_step": 387.125
+  }
+}

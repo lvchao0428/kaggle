@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Sync this repo to the SSH mirror (same credentials as scp).
+# Audio/video-style files (mp4, gif, mp3, etc.) are excluded from rsync.
 # Default: charlie@www.ultrapp.online:/home/charlie/project/kaggle
 #
 # Requires: rsync on both ends (install: apt install rsync / brew install rsync).
@@ -47,6 +48,28 @@ RSYNC+=(
   --exclude "*.egg-info/"
   --exclude ".DS_Store"
   --exclude "dist/*.tar.gz"
+  # Audio / video (do not mirror large media)
+  --exclude "*.mp4"
+  --exclude "*.webm"
+  --exclude "*.avi"
+  --exclude "*.mov"
+  --exclude "*.mkv"
+  --exclude "*.m4v"
+  --exclude "*.wmv"
+  --exclude "*.flv"
+  --exclude "*.mpg"
+  --exclude "*.mpeg"
+  --exclude "*.3gp"
+  --exclude "*.ogv"
+  --exclude "*.mp3"
+  --exclude "*.wav"
+  --exclude "*.flac"
+  --exclude "*.aac"
+  --exclude "*.m4a"
+  --exclude "*.ogg"
+  --exclude "*.opus"
+  --exclude "*.wma"
+  --exclude "*.gif"
 )
 
 echo "Sync: $ROOT/ -> ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
