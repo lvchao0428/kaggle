@@ -4,10 +4,10 @@ Conquer planets rotating around a sun in continuous 2D space. A real-time strate
 
 ## This repository (bot)
 
-- **Current default bot:** `submission_v20.py` (self-contained; regional + MCTS helpers inlined; v19 lineage + opening/sync tweaks). Version notes live in comments / `PHASE_TABLE` sections inside each `submission_v*.py`; older notes in `archive/legacy/docs/`.
+- **Current default bot:** `submission_v20.py` (thin Kaggle entry) + `orbit_submit/` package (full v20 implementation; v19 lineage + opening/sync tweaks). Version notes live in `orbit_submit/policy.py` (`PHASE_TABLE` comments) and [`docs/ARCHITECTURE_submission_v20_zh.md`](docs/ARCHITECTURE_submission_v20_zh.md) / [`docs/ARCHITECTURE_submission_v20.md`](docs/ARCHITECTURE_submission_v20.md); older notes in `archive/legacy/docs/`.
 - **Self-play, eval scripts, Kaggle packaging:** **[docs/SELF_PLAY_AND_SUBMISSION.md](docs/SELF_PLAY_AND_SUBMISSION.md)**（自对弈与 RL 管线、`eval_head2head`、`rollout_worker`、`package` 一键流程）。
 - **v20 pessimistic rollout:** Mid/late plans can be reranked using `score_plan_actions_paranoid` (one pessimistic opponent launch heuristic, min over prototypes) with budget `paranoid_score_budget_ms` in `PHASE_TABLE`.
-- **Local strategy profiles:** `ORB_STRATEGY_PROFILE` ContextVar — use `scripts/eval_head2head.py --a v20@rush --b v17` etc. Profiles: `turtle`, `rush`, `expand`, `greedy_prod`, `dual` (see `_STRATEGY_PROFILE_DELTAS` in `submission_v20.py`).
+- **Local strategy profiles:** `ORB_STRATEGY_PROFILE` ContextVar — use `scripts/eval_head2head.py --a v20@rush --b v17` etc. Profiles: `turtle`, `rush`, `expand`, `greedy_prod`, `dual` (see `_STRATEGY_PROFILE_DELTAS` in `orbit_submit/policy.py`).
 - **Planet Wars archetypes (PW → OW naming only):** ExpandBot→`expand`, Rage/Bully→`rush`, ProspectorBot→`greedy_prod`, DualBot→`dual`, RandomBot→built-in `random` / noisy RL. Java PW bots cannot run in Orbit Wars; names map to PHASE_TABLE deltas for styled Python opponents / rollouts.
 - **Gate sweeps:** `ORB_REGION_PRESSURE_RATIO`, `ORB_SAFE_SURPLUS_SHIP_MULT`, `ORB_BASELINE_COMMIT_MARGIN` env vars override numeric gates per process; helper `tools/sweep_commit_gates.py`.
 - **Rollout mix:** `tools/rollout_worker.py --opponent-mix "self:0.5,v13:0.3,v20@turtle:0.2"` (tokens `self`, `random`, `vNN`, `v20@profile`).

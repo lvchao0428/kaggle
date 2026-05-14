@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate submission_v21_lite.py, submission_v21_pro.py, submission_v21_ultra.py
-from submission_v20.py by patching docstring, version label, and NeuralVal widths.
+from a **frozen monolith snapshot** (``tools/templates/v20_monolith_for_v21_codegen.py``)
+by patching docstring, version label, and NeuralVal widths. Update that snapshot when
+the v20 policy stack changes materially (``orbit_submit`` is the live source).
 
 NeuralVal layout (NumPy, same matmul as v20):
   h1 = ReLU(W1 @ x + b1),  W1: (h1, 14), b1: (h1,)
@@ -106,7 +108,7 @@ def patch_module_docstring(src: str, title_paragraph: str) -> str:
 
 def generate_one(tier: str, dry_run: bool) -> None:
     h1, h2 = TIER_DIMS[tier]
-    in_path = ROOT / "submission_v20.py"
+    in_path = ROOT / "tools" / "templates" / "v20_monolith_for_v21_codegen.py"
     out_path = ROOT / f"submission_v21_{tier}.py"
     text = in_path.read_text(encoding="utf-8")
     text = patch_module_docstring(text, TIER_DOC[tier])

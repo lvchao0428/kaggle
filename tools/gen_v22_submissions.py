@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate submission_v22_lite.py, submission_v22_pro.py, submission_v22_ultra.py
-from submission_v20.py (same NeuralVal widths as v21).
+from ``tools/templates/v20_monolith_for_v21_codegen.py`` (same NeuralVal widths as v21).
 
 v22: fill NeuralVal via tools/distill_vec_bridge_v22.py after vec_orbit + real shards.
 
@@ -98,7 +98,7 @@ def patch_module_docstring(src: str, title_paragraph: str) -> str:
 
 def generate_one(tier: str, dry_run: bool) -> None:
     h1, h2 = TIER_DIMS[tier]
-    in_path = ROOT / "submission_v20.py"
+    in_path = ROOT / "tools" / "templates" / "v20_monolith_for_v21_codegen.py"
     out_path = ROOT / f"submission_v22_{tier}.py"
     text = in_path.read_text(encoding="utf-8")
     text = patch_module_docstring(text, TIER_DOC[tier])

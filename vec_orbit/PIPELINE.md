@@ -173,7 +173,7 @@ python -m vec_orbit.bench --device cuda --batch 8192 --steps 200
 
 **结论**：要 **可提交**，现阶段仍须以 **§5 真环境步骤** 为主（CPU 重在做对局）；要 **减少「训练循环里模拟」的 CPU 占比**，才用 **vec_orbit + CUDA** 做旁路实验——它和提交链是 **两条线**，文档里分开写是有意的。
 
-蒸馏逻辑摘要：教师吃 **31 维**（14 维 `state_feat` + 17 维 plan 占位从 shard 来），见 [`distill_to_numpy_v21.py`](../tools/distill_to_numpy_v21.py)；学生只学 **14 维状态价值** 以对齐 `submission_v20` 里的 `NeuralVal`。
+蒸馏逻辑摘要：教师吃 **31 维**（14 维 `state_feat` + 17 维 plan 占位从 shard 来），见 [`distill_to_numpy_v21.py`](../tools/distill_to_numpy_v21.py)；学生只学 **14 维状态价值** 以对齐 `orbit_submit/neural.py` 里的 `NeuralVal`（v20 默认权重在 `orbit_submit/neural_weights_v20.py`）。
 
 ---
 

@@ -122,7 +122,7 @@
 ;;; 到账回合 = ORDER.TURN + 航程。
 (defun arrival-turn (order)
   (+ (turn order) (turns-to-travel (source order) (destination order))))
-
+`
 ;;; 单笔订单相等。
 (defun order= (order1 order2)
   (and (eq (source order1) (source order2))

@@ -68,6 +68,6 @@ python3 tools/test_launch_trajectory_gate.py
 
 | 文件 | 说明 |
 |------|------|
-| [submission_v20.py](../submission_v20.py) | `swept_pair_hit`、`planet_motion_segment`、`launch_hits_target_first`、`ENGINE_LAUNCH_PAD` |
+| [`submission_v20.py`](../submission_v20.py)（re-export） / [`orbit_submit/kinematics.py`](../orbit_submit/kinematics.py) | `swept_pair_hit`、`planet_motion_segment`、`launch_hits_target_first`、`ENGINE_LAUNCH_PAD` |
 | [tools/aim_trainer.py](aim_trainer.py) | 对局级 OOB/sun 统计 |
 | [tools/test_launch_trajectory_gate.py](test_launch_trajectory_gate.py) | 离线单元测试 |

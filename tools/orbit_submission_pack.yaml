@@ -1,0 +1,20 @@
+# Optional overrides when defaults are insufficient.
+#
+# Defaults (no YAML needed for ordinary versions):
+#   entry → <repo>/submission_<version>.py  (copied to main.py at archive root)
+#   packages → [orbit_submit/]
+#
+# Example:
+#
+# versions:
+#   custom_slug:
+#     entry: path/to/other_entry.py
+#     packages:
+#       - orbit_submit
+#       - another_namespace_pkg
+#     files:
+#       - cfg.json
+#       - src: notebooks/foo.txt
+#         dest: notes.txt
+
+versions: {}

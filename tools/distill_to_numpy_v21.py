@@ -25,6 +25,7 @@ from tools.v21.nets import build_net, best_device
 
 
 def _load_target_shapes(target_py: Path) -> Tuple[int, int, int]:
+    """Loads target module; NeuralVal weights come from submission wiring (registry) or stubs."""
     mod_key = f"target_nv_sub__{target_py.stem}"
     spec = importlib.util.spec_from_file_location(mod_key, target_py)
     if spec is None or spec.loader is None:
@@ -152,7 +153,10 @@ def main():
 
     b64 = encode_b64(student)
     args.out_b64.write_text(b64, encoding="utf-8")
-    print(f"Wrote {args.out_b64} — paste into target _NEURAL_WEIGHTS_B64")
+    print(
+        f"Wrote {args.out_b64} — set submission _NEURAL_WEIGHTS_B64 "
+        "(thin entries wire registry.neural_weights_b64)"
+    )
 
 
 if __name__ == "__main__":
