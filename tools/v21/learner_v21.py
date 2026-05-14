@@ -22,14 +22,32 @@ if str(ROOT) not in sys.path:
 from tools.v21.nets import build_net, best_device
 
 
-def load_shards(runs_dir: Path) -> List[Dict]:
+def load_shards(runs_dir: Path, *, archive_shards: bool = False) -> List[Dict]:
+    """Load ``shard_w*.msgpack`` from *runs_dir* root.
+
+    Default: delete each file after successful read (next rollout writes fresh shards).
+    With ``archive_shards=True``: move to ``runs_dir/shard_archive/`` for distill / audit.
+    """
     games: List[Dict] = []
+    archive_dir = runs_dir / "shard_archive"
     for shard in sorted(runs_dir.glob("shard_w*.msgpack")):
         try:
             with open(shard, "rb") as f:
                 payload = msgpack.unpack(f, raw=False)
             games.extend(payload.get("games", []))
-            shard.unlink()
+            if archive_shards:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / shard.name
+                if dest.is_file():
+                    stem = shard.stem
+                    for k in range(1, 10_000):
+                        cand = archive_dir / f"{stem}_{k}.msgpack"
+                        if not cand.is_file():
+                            dest = cand
+                            break
+                shard.rename(dest)
+            else:
+                shard.unlink()
         except Exception as e:
             print(f"  failed to load {shard}: {e}", file=sys.stderr)
     return games
@@ -187,12 +205,20 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--wait-secs", type=float, default=30.0)
     ap.add_argument("--ckpt-every", type=int, default=2)
+    ap.add_argument(
+        "--archive-shards",
+        action="store_true",
+        help="After training, move consumed shard_w*.msgpack to runs-dir/shard_archive/ "
+        "(keep for distill_to_numpy_v21.py) instead of deleting.",
+    )
     args = ap.parse_args()
 
     runs_dir = Path(args.runs_dir)
     runs_dir.mkdir(parents=True, exist_ok=True)
     device = best_device()
     print(f"v21 learner device: {device}  tier={args.tier}")
+    if args.archive_shards:
+        print(f"  archive-shards: consumed shard_w*.msgpack → {runs_dir / 'shard_archive'}/")
 
     net = build_net(args.tier).to(device)
     opt = Adam(net.parameters(), lr=args.lr)
@@ -211,7 +237,7 @@ def main():
     for upd in range(args.updates):
         t0 = time.time()
         while True:
-            games = load_shards(runs_dir)
+            games = load_shards(runs_dir, archive_shards=args.archive_shards)
             if games:
                 break
             if time.time() - t0 > args.wait_secs:

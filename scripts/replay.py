@@ -8,6 +8,15 @@
     # 最简：v13 vs v12，seed=42，生成 replay.html 后自动打开浏览器
     python3.12 scripts/replay.py
 
+    # 四人混战 FFA（默认 v20 + 3×random，只跑一局、生成 HTML，比 4×v20 评估快很多）
+    python3 scripts/replay.py --ffa --a v20 --seed 1619309859
+
+    # FFA：你是 v20，另外三家都用 v19（比 4×random 更「正常」，仍比 4×v20 轻）
+    python3 scripts/replay.py --ffa --a v20 --b v19 --c v19 --d v19 --seed 1619309859
+
+    # 四人全部指定（会慢：四席都是重 bot 时）
+    python3 scripts/replay.py --ffa --a v20 --b v19 --c random --d random --seed 0
+
     # 指定版本 / seed / 步数
     python3.12 scripts/replay.py --a v13 --b v11 --seed 7 --steps 200
 
@@ -26,14 +35,13 @@
 输出的 HTML 文件用标准浏览器打开即可看到：
   - 动画回放（可播放 / 暂停 / 拖进度条）
   - 每回合行星状态、舰队轨迹
-  - 双方分数曲线
+  - 两方或四方分数曲线（取决于 1v1 / --ffa）
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
-import os
 import subprocess
 import sys
 import time
@@ -58,13 +66,6 @@ def _load_agent(version: str):
     return mod.agent
 
 
-def _make_callable(agent):
-    """Wrap agent so it can be passed to kaggle_environments."""
-    if isinstance(agent, str):
-        return agent
-    return lambda obs, cfg, _a=agent: _a(obs, cfg)
-
-
 def _parse_seeds(seed: int, seeds_arg: list[str] | None) -> list[int]:
     """Single --seed or multiple --seeds tokens (same as eval_head2head: '0-9' or '0 1 2')."""
     if seeds_arg:
@@ -80,10 +81,48 @@ def _parse_seeds(seed: int, seeds_arg: list[str] | None) -> list[int]:
     return [seed]
 
 
+def _slug_version(v: str) -> str:
+    return v.replace("@", "_at_").replace("/", "_").replace(".", "_")
+
+
+def _run_until_done(env, agents: list, max_steps: int) -> int:
+    """Step environment with ``len(agents)`` parallel players. Returns steps executed."""
+    n = len(agents)
+    step = 0
+    t0 = time.time()
+    while not env.done and step < max_steps:
+        cfg = env.configuration
+        actions = []
+        for i in range(n):
+            ag = agents[i]
+            obs = env.state[i].observation
+            if isinstance(ag, str):
+                actions.append(ag)
+            else:
+                actions.append(ag(obs, cfg))
+        env.step(actions)
+        step += 1
+        if step % 100 == 0:
+            r = [s.reward for s in env.state]
+            print(f"  step {step}/{max_steps}  scores={r}  elapsed={time.time()-t0:.1f}s")
+    return step
+
+
 def main():
     p = argparse.ArgumentParser(description="Orbit Wars local replay generator")
-    p.add_argument("--a", default="v13", help="Agent A version (e.g. v13)")
-    p.add_argument("--b", default="v12", help="Agent B version (e.g. v12, random)")
+    p.add_argument(
+        "--ffa",
+        action="store_true",
+        help="Four-player FFA HTML replay. Default seats 1–3: random (seat 0 = --a).",
+    )
+    p.add_argument("--a", default="v13", help="Agent A / seat 0 (e.g. v20 with --ffa)")
+    p.add_argument(
+        "--b",
+        default=None,
+        help="Agent B / seat 1 (1v1 default v12 if omitted; --ffa default random)",
+    )
+    p.add_argument("--c", default=None, help="Seat 2 (--ffa only; default random)")
+    p.add_argument("--d", default=None, help="Seat 3 (--ffa only; default random)")
     p.add_argument("--seed", type=int, default=42,
                    help="Game seed (ignored if --seeds is set)")
     p.add_argument("--seeds", nargs="*", default=None,
@@ -98,55 +137,58 @@ def main():
                    help="With multiple --seeds, open the first replay instead of the last")
     args = p.parse_args()
 
+    if args.ffa:
+        lineup_labels = [
+            args.a,
+            args.b or "random",
+            args.c or "random",
+            args.d or "random",
+        ]
+    else:
+        lineup_labels = [args.a, args.b or "v12"]
+
     seed_list = _parse_seeds(args.seed, args.seeds)
     if len(seed_list) > 1 and args.out:
         print("--out is only allowed with a single seed; ignoring --out", file=sys.stderr)
 
     from kaggle_environments import make
 
-    print(f"Loading agents: {args.a} vs {args.b} ...")
-    agent_a = _load_agent(args.a)
-    agent_b = _load_agent(args.b)
+    print(f"Loading agents: {' | '.join(lineup_labels)} ({'FFA' if args.ffa else '1v1'}) ...")
+    agents = [_load_agent(lab) for lab in lineup_labels]
 
     last_out: Path | None = None
     for i, sd in enumerate(seed_list):
         print(f"Running game  seed={sd}  max_steps={args.steps} ...")
         env = make("orbit_wars", debug=False, configuration={"seed": int(sd)})
-        env.reset()
+        env.reset(len(agents))
 
         t0 = time.time()
-        step = 0
-        while not env.done and step < args.steps:
-            obs_a = env.state[0].observation
-            obs_b = env.state[1].observation
-            cfg = env.configuration
-
-            act_a = agent_a(obs_a, cfg) if not isinstance(agent_a, str) else None
-            act_b = agent_b(obs_b, cfg) if not isinstance(agent_b, str) else None
-
-            actions = []
-            if isinstance(agent_a, str):
-                actions.append(agent_a)
-            else:
-                actions.append(act_a)
-            if isinstance(agent_b, str):
-                actions.append(agent_b)
-            else:
-                actions.append(act_b)
-
-            env.step(actions)
-            step += 1
-            if step % 100 == 0:
-                r = [s.reward for s in env.state]
-                print(f"  step {step}/{args.steps}  scores={r}  elapsed={time.time()-t0:.1f}s")
+        step = _run_until_done(env, agents, args.steps)
 
         elapsed = time.time() - t0
         final_rewards = [s.reward for s in env.state]
-        winner = args.a if final_rewards[0] > final_rewards[1] else (
-            args.b if final_rewards[1] > final_rewards[0] else "tie"
+        if len(agents) == 2:
+            winner = (
+                lineup_labels[0]
+                if final_rewards[0] > final_rewards[1]
+                else (
+                    lineup_labels[1]
+                    if final_rewards[1] > final_rewards[0]
+                    else "tie"
+                )
+            )
+        else:
+            mx = max(final_rewards)
+            win_ix = [i for i, r in enumerate(final_rewards) if r == mx]
+            winner = (
+                ", ".join(f"seat{j}={lineup_labels[j]}" for j in win_ix)
+                if len(win_ix) < len(final_rewards)
+                else "tie"
+            )
+        print(
+            f"Game done  seed={sd}  steps={step}  rewards={final_rewards}  "
+            f"winner={winner}  {elapsed:.1f}s"
         )
-        print(f"Game done  seed={sd}  steps={step}  rewards={final_rewards}  "
-              f"winner={winner}  {elapsed:.1f}s")
 
         # Render HTML
         print("Rendering HTML ...")
@@ -158,7 +200,11 @@ def main():
         else:
             replay_dir = ROOT / "replays"
             replay_dir.mkdir(exist_ok=True)
-            out_path = replay_dir / f"{args.a}_vs_{args.b}_seed{sd}.html"
+            if args.ffa:
+                parts = [_slug_version(x) for x in lineup_labels]
+                out_path = replay_dir / f"ffa_{'_'.join(parts)}_seed{sd}.html"
+            else:
+                out_path = replay_dir / f"{args.a}_vs_{args.b or 'v12'}_seed{sd}.html"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(html, encoding="utf-8")
@@ -174,7 +220,11 @@ def main():
             replay_dir = ROOT / "replays"
             replay_dir.mkdir(exist_ok=True)
             first_sd = seed_list[0]
-            candidate = replay_dir / f"{args.a}_vs_{args.b}_seed{first_sd}.html"
+            if args.ffa:
+                parts = [_slug_version(x) for x in lineup_labels]
+                candidate = replay_dir / f"ffa_{'_'.join(parts)}_seed{first_sd}.html"
+            else:
+                candidate = replay_dir / f"{args.a}_vs_{args.b or 'v12'}_seed{first_sd}.html"
             if candidate.is_file():
                 to_open = candidate
         print(f"Opening in browser: {to_open}")

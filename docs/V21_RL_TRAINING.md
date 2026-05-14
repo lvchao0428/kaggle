@@ -73,8 +73,9 @@
 - **蒸馏进提交**：[`tools/distill_to_numpy_v21.py`](tools/distill_to_numpy_v21.py)  
   - `--teacher-tier` + `--checkpoint`：教师为对应 **PolicyValueNet**  
   - `--target-submission submission_v21_pro.py`：自动读取目标 **`NeuralVal`** 的 **h1/h2** 宽度  
-  - `--shards-dir`：用 transition 里的 **`state_feat`** 回归教师的 **value**（对 state 填零 pad 到 31 维再过教师）  
+  - `--shards-dir`：指向 `runs/<exp>/`；会合并根目录与 **`shard_archive/`** 下所有 `shard_w*.msgpack`，用 **`state_feat`** 回归教师 **value**（state 侧 pad 到 31 维再过教师）  
   - 输出 **`--out-b64`** 文本，**替换**目标文件里 **`_NEURAL_WEIGHTS_B64 = "..."`**
+- **Learner 消费后的 shard**：默认 **删除**（避免下一轮重复训练同一批）。若需留给蒸馏、不必再滚 rollout：对 **`learner_v21.py`** 或 **`train_supervisor.py`** 加 **`--archive-shards`**，消费后会把文件 **移到** `runs/<exp>/shard_archive/`（仍可用 `--shards-dir runs/<exp>` 跑蒸馏）。后台脚本可设 **`V21_ARCHIVE_SHARDS=1`** 再执行 `scripts/train_v21_*.sh`。
 
 ---
 
@@ -100,8 +101,11 @@ python3.13 tools/v21/train_supervisor.py \
   --iterations 6 \
   --workers 4 \
   --games-per-worker 15 \
-  --lr 3e-4
+  --lr 3e-4 \
+  --archive-shards
 ```
+
+`--archive-shards`：learner 读完后把 msgpack **移到** `runs/v21_lite/shard_archive/`，方便 `distill_to_numpy_v21.py`，且下一轮不会重复吃同一批文件。
 
 **写出：**
 

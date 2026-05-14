@@ -8,6 +8,12 @@ PY="${PY:-python3.13}"
 . "${ROOT}/scripts/_train_v21_common.sh"
 v21_require_interpreter
 
+# Set V21_ARCHIVE_SHARDS=1 to keep msgpack for distill (moved to runs/v21_lite/shard_archive/).
+ARCH_EXTRA=()
+if [[ "${V21_ARCHIVE_SHARDS:-0}" == "1" ]]; then
+  ARCH_EXTRA=(--archive-shards)
+fi
+
 STAMP="$(date +%Y%m%d_%H%M%S)"
 mkdir -p logs runs/v21_lite
 nohup "$PY" tools/v21/train_supervisor.py \
@@ -22,6 +28,7 @@ nohup "$PY" tools/v21/train_supervisor.py \
   --wait-secs 180 \
   --python "$PY" \
   --opponents v20 v19 \
+  "${ARCH_EXTRA[@]}" \
   > "logs/v21_lite_${STAMP}.log" 2>&1 &
 echo "PID=$!  log=logs/v21_lite_${STAMP}.log"
 echo "Watch live: ./scripts/watch_v21_training.sh runs/v21_lite"

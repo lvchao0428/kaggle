@@ -412,6 +412,19 @@ class GameState:
         self.episode_steps = int(_get(cfg, "episodeSteps", DEFAULT_EPISODE_STEPS)
                                  or DEFAULT_EPISODE_STEPS)
 
+        # Observation may embed a stripped configuration without ``spawn_positions``;
+        # runner still passes full ``config`` → merge so FFA gates stay correct.
+        sp_raw = _get(cfg, "spawn_positions", None)
+        if not isinstance(sp_raw, (list, tuple)) or len(sp_raw) == 0:
+            sp_fallback = _get(config, "spawn_positions", None) if config else None
+            if isinstance(sp_fallback, (list, tuple)) and len(sp_fallback) > 0:
+                sp_raw = sp_fallback
+        if isinstance(sp_raw, (list, tuple)):
+            self.spawn_positions: List = list(sp_raw)
+        else:
+            self.spawn_positions = []
+        self.spawn_count = len(self.spawn_positions)
+
         comet_ids = set(int(x) for x in (_get(obs, "comet_planet_ids", []) or []))
         self.comet_paths: Dict[int, Tuple[List[Tuple[float, float]], int]] = {}
         self._parse_comets(_get(obs, "comets", []) or [])
@@ -566,8 +579,35 @@ class GameState:
         attackers = sum(v for k, v in inc.items() if k not in (-1, self.my_id))
         return attackers - inc.get(self.my_id, 0)
 
+    def is_ffa_mode(self) -> bool:
+        """Four-player FFA: ``spawn_positions`` has 4+ entries on Kaggle.
+
+        Local ``kaggle_environments`` often omits ``spawn_positions``; infer FFA when
+        there are **two or more distinct enemy player ids** (4p → 3 opponents).
+        """
+        if self.spawn_count >= 4:
+            return True
+        return len(self.en_ids) >= 2
+
+    def is_duel_mode(self) -> bool:
+        """Classic 1v1: two spawn slots, or exactly one opponent when spawns missing."""
+        if self.spawn_count == 2:
+            return True
+        return len(self.en_ids) == 1
+
     def phase(self) -> str:
         progress = self.step / max(1, self.episode_steps)
+        # FFA episodes often end ~200–280 steps; stretch late/mid boundaries and
+        # add a turns-left cliff so LateDump / late policy row can engage in time.
+        if self.is_ffa_mode():
+            tl = self.turns_left()
+            if tl <= max(90, int(self.episode_steps * 0.22)):
+                return "late"
+            if progress < 0.14:
+                return "early"
+            if progress < 0.36:
+                return "mid"
+            return "late"
         if progress < 0.18:
             return "early"
         if progress < 0.64:
@@ -1433,12 +1473,25 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     enemy_bonus = 30.0 if is_en else 0.0
     if is_en and src.dist(dst) < 20.0:
         enemy_bonus += 35.0
+    # FFA 开局：咫尺可吞的弱敌星（同产、兵少）提高排序，避免只顾闷发展
+    if (
+        is_en
+        and state.is_ffa_mode()
+        and state.phase() == "early"
+    ):
+        dm = min((m.dist(dst) for m in state.my_pl), default=999.0)
+        if dm <= 44.0:
+            eg = float(state.effective_garrison(dst))
+            if eg <= 58.0:
+                enemy_bonus += 22.0 + max(0.0, 44.0 - dm) * 0.9
     comet_bonus = 12.0 if dst.is_comet else 0.0
     rec_bonus = recapture_bonus(snap, dst)
     # Early race for big factories: nudge expand ordering toward prod>=4 neutrals.
-    early_hot_neutral = (
-        22.0 if (is_neu and state.phase() == "early" and dst.production >= 4) else 0.0
-    )
+    early_hot_neutral = 0.0
+    if is_neu and state.phase() == "early" and dst.production >= 4:
+        early_hot_neutral = 22.0
+        if state.is_ffa_mode():
+            early_hot_neutral += 20.0
     # Value-per-commitment: prod^2 / need  favors factories over low-prod mites when
     # distances are similar (common case: 20@prod4 vs 14@prod1).
     neutral_mfg = 0.0
@@ -1448,6 +1501,13 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     # 距离惩罚：eta 的 **强** 衰减——这是与旧版最大的区别
     # eta=5 → 0.67, eta=10 → 0.50, eta=20 → 0.37, eta=30 → 0.31
     distance_decay = 1.0 / (1.0 + eta * 0.10)
+    # FFA：进一步惩罚「远征」，保住出生弧附近早占厂、早产兵节奏
+    if state.is_ffa_mode():
+        ph = state.phase()
+        if ph == "early":
+            distance_decay *= 1.0 / (1.0 + max(0, eta - 8) * 0.078)
+        elif ph == "mid":
+            distance_decay *= 1.0 / (1.0 + max(0, eta - 15) * 0.045)
 
     # 兵力成本：需要的兵越多，性价比越低
     cost_pen = 0.0
@@ -1469,10 +1529,57 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
     if is_neu and state.phase() == "early" and dst.production <= 1:
         mite_neutral_pen = 38.0
 
+    opening_neutral_nudge = 0.0
+    if is_neu and state.phase() == "early" and dst.production >= 4 and dst.ships >= 14:
+        d_anchor = min((m.dist(dst) for m in state.my_pl), default=999.0)
+        if d_anchor < 52.0:
+            opening_neutral_nudge = (
+                (52.0 - d_anchor) * 0.88
+                + float(dst.production) * 5.2
+                + min(18.0, max(0.0, float(dst.ships) - 12.0) * 0.22)
+            )
+            if state.is_ffa_mode():
+                opening_neutral_nudge *= 1.2
+
+    # FFA：2–3 产近邻灰也是肉（早占累计产能 + 内环球接力），避免只盯远征
+    # 注意：FFA phase 在 progress≳0.36 就进 late，短局 ~80t 起会关掉 early/mid；
+    # 若这里也随 phase 关掉，右下「口袋」灰会一直抢不过远征排序。
+    mosquito_relay = 0.0
+    if is_neu and state.is_ffa_mode():
+        d_an = min((m.dist(dst) for m in state.my_pl), default=999.0)
+        if d_an < 52.0 and 2 <= dst.production <= 3:
+            ph = state.phase()
+            relay_scale = 1.0 if ph != "late" else 0.82
+            mosquito_relay = relay_scale * (
+                14.0 + (52.0 - d_an) * 0.72 + float(dst.production) * 8.0
+            )
+            if is_sun_belt_planet(state, dst):
+                mosquito_relay += 24.0 * relay_scale
+
+    local_expedition_pen = 0.0
+    if state.is_ffa_mode() and (is_neu or is_en) and eta > 12:
+        dm = min((m.dist(dst) for m in state.my_pl), default=999.0)
+        if dm > 44.0:
+            idle_n = sum(
+                1
+                for n in state.neu_pl
+                if n.production >= 2
+                and min((m.dist(n) for m in state.my_pl), default=999.0) < 56.0
+            )
+            if idle_n >= 1:
+                local_expedition_pen = min(
+                    54.0,
+                    (eta - 10) * math.sqrt(float(idle_n)) * 1.12,
+                )
+
     orbit_arc = 0.0
     approach_adj = 0.0
     fat_local_neu = 0.0
     finish_neu = 0.0
+    orbiting_tgt = (
+        not dst.is_comet and state.is_orbiting(dst) and bool(state.my_pl)
+    )
+
     if is_neu:
         if state.en_pl:
             orbit_arc = orbit_arc_strategic_score(state, dst, eta)
@@ -1481,7 +1588,22 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
             d_anchor = min(dst.dist(m) for m in state.my_pl)
             if d_anchor < 36.0:
                 # 身边大灰（如 59）：优先吃近处高驻军工厂，少去追「路过」小灰
-                fat_local_neu = 16.0 + (36.0 - d_anchor) * 1.65 + min(22.0, dst.ships * 0.08)
+                fat_local_neu = (
+                    16.0 + (36.0 - d_anchor) * 1.65
+                    + min(22.0, dst.ships * 0.08)
+                )
+        elif (
+            state.is_ffa_mode()
+            and state.phase() == "early"
+            and dst.production >= 4
+            and dst.ships >= 18
+        ):
+            d_anchor = min((m.dist(dst) for m in state.my_pl), default=999.0)
+            if d_anchor < 44.0:
+                fat_local_neu = (
+                    9.0 + (44.0 - d_anchor) * 1.15
+                    + min(14.0, (dst.ships - 16) * 0.07)
+                )
         oth = my_inbound_ships_to(state, dst.id)
         if oth > 0 and oth <= dst.ships + 4:
             # 已有己方舰队在途但未够占领：优先补刀，避免下回合改打远处浪费产兵
@@ -1489,12 +1611,21 @@ def target_score(snap: Snapshot, src: Planet, dst: Planet) -> Tuple[float, int, 
             if 1 <= gap <= 18:
                 finish_neu = 52.0 + (18 - gap) * 1.5
 
+    elif is_en and orbiting_tgt and state.en_pl:
+        # 旋转图：敌对星球同样吃「我方弧 / 敌方弧」漂移（原先仅中立算）
+        orbit_arc = orbit_arc_strategic_score(state, dst, eta)
+        approach_adj = 0.82 * approach_bonus(snap, dst, eta)
+
     score = (
         prod_value + prod_bonus + enemy_bonus + comet_bonus + rec_bonus
-        + early_hot_neutral + neutral_mfg + fat_local_neu + finish_neu
+        + early_hot_neutral + opening_neutral_nudge + mosquito_relay
+        + neutral_mfg + fat_local_neu + finish_neu
         + orbit_arc + approach_adj
     ) * distance_decay
-    score -= cost_pen + snipe_pen + mite_neutral_pen + sun_detour_pen
+    score -= (
+        cost_pen + snipe_pen + mite_neutral_pen + sun_detour_pen
+        + local_expedition_pen
+    )
     # 内环球中立：战略优先级（旋转进对手弧前须占）
     if is_neu and is_sun_belt_planet(state, dst):
         score += 38.0 * distance_decay
@@ -1535,9 +1666,40 @@ def regional_capture_adjustment(
         bonus += min(16.0, pot * 1.8)
         return bonus - dist_cost * 0.35
 
+    # FFA：出生弧附近 2–4 产口袋灰若被划到「邻区」，远征税会把排序打到远征后面
+    if (
+        state.is_ffa_mode()
+        and dst.owner == -1
+        and 2 <= dst.production <= 4
+        and state.my_pl
+    ):
+        frontier = min(m.dist(dst) for m in state.my_pl)
+        if frontier < 46.0:
+            dist_cost *= 0.55
+
     cross = 10.0 + 0.045 * float(eta * eta)
     if is_sun_belt_planet(state, dst) and dst.owner == -1:
         cross *= 0.38
+    if state.is_ffa_mode() and dst.production >= 5 and state.my_pl:
+        frontier = min(m.dist(dst) for m in state.my_pl)
+        if frontier < 32.0:
+            cross *= 0.46
+    if (
+        state.is_ffa_mode()
+        and state.phase() == "early"
+        and rid_s != rid_d
+    ):
+        cross *= 1.0 + max(0.0, float(eta - 11)) * 0.058
+
+    if (
+        state.is_ffa_mode()
+        and dst.owner == -1
+        and 2 <= dst.production <= 4
+        and state.my_pl
+    ):
+        frontier = min(m.dist(dst) for m in state.my_pl)
+        if frontier < 46.0:
+            cross *= 0.42
     return -cross - dist_cost
 
 
@@ -1901,9 +2063,11 @@ class DefensePlanner:
                 need = threat + max(5, tgt.production * 2)
             else:
                 # Proactive: reinforce to absorb the incoming fleet.
-                incoming = sum(f.ships for f in state.fleets
-                               if f.owner not in (-1, state.my_id)
-                               and state.fleet_target.get(f.id, (None,))[0] == tgt.id)
+                incoming = sum(
+                    f.ships for f in state.fleets
+                    if f.owner not in (-1, state.my_id)
+                    and (tft := state.fleet_target.get(f.id)) is not None
+                    and tft[0] == tgt.id)
                 need = max(incoming - tgt.ships + tgt.production * 3, ABS_MIN_BATCH)
             helpers = sorted((p for p in state.my_pl if p.id != tgt.id),
                              key=lambda p: p.dist(tgt))
@@ -2027,6 +2191,16 @@ def _build_capture_plan(snap: Snapshot, mode: str,
                 sc += diplo.leader_penalty(dst)
             if sc > best_sc:
                 best_sc = sc
+        # FFA expand：近处 2+ 产灰星强制挤进排序前列，避免 split_lock 先把出兵星锁去远征
+        if (
+            mode == "expand"
+            and state.is_ffa_mode()
+            and dst.owner == -1
+            and dst.production >= 2
+        ):
+            dmin = min((m.dist(dst) for m in state.my_pl), default=999.0)
+            if dmin < 50.0:
+                best_sc += 44.0
         if best_sc > rank_floor:
             ranked.append((best_sc, dst))
     ranked.sort(key=lambda x: -x[0])
@@ -2045,29 +2219,34 @@ def _build_capture_plan(snap: Snapshot, mode: str,
         # few turns of HQ production — don't burn the first wave on 14@1 when 20@3/4
         # is about to become peelable (same orbit / similar eta).
         if mode == "expand" and dst.owner == -1 and dst.production <= 2:
-            pool_rem = sum(
-                max(0, snap.avail(p.id) - local_used[p.id]) for p in state.my_pl)
-            my_prod_sum = sum(p.production for p in state.my_pl)
+            touch_d = min((m.dist(dst) for m in state.my_pl), default=999.0)
+            skip_defer = (
+                state.is_ffa_mode() and touch_d < 50.0 and dst.production >= 2
+            )
             defer_low_yield = False
-            for h in state.neu_pl:
-                if h.production < 3 or h.id == dst.id:
-                    continue
-                if not any(
-                    point_segment_distance(SUN_X, SUN_Y, sx.x, sx.y, h.x, h.y)
-                    >= SUN_RADIUS + SUN_PATH_MARGIN
-                    for sx in state.my_pl
-                ):
-                    continue
-                min_need = min(
-                    capture_need(state, s, h)[0] for s in state.my_pl)
-                # prod==1 mites: wait longer toward factory; prod==2 slightly longer than old slack.
-                if dst.production <= 1:
-                    wait_budget = max(my_prod_sum * 6, 20 + my_prod_sum * 2, 24)
-                else:
-                    wait_budget = max(my_prod_sum * 4, 12 + my_prod_sum * 2)
-                if pool_rem < min_need <= pool_rem + wait_budget:
-                    defer_low_yield = True
-                    break
+            if not skip_defer:
+                pool_rem = sum(
+                    max(0, snap.avail(p.id) - local_used[p.id]) for p in state.my_pl)
+                my_prod_sum = sum(p.production for p in state.my_pl)
+                for h in state.neu_pl:
+                    if h.production < 3 or h.id == dst.id:
+                        continue
+                    if not any(
+                        point_segment_distance(SUN_X, SUN_Y, sx.x, sx.y, h.x, h.y)
+                        >= SUN_RADIUS + SUN_PATH_MARGIN
+                        for sx in state.my_pl
+                    ):
+                        continue
+                    min_need = min(
+                        capture_need(state, s, h)[0] for s in state.my_pl)
+                    # prod==1 mites: wait longer toward factory; prod==2 slightly longer than old slack.
+                    if dst.production <= 1:
+                        wait_budget = max(my_prod_sum * 6, 20 + my_prod_sum * 2, 24)
+                    else:
+                        wait_budget = max(my_prod_sum * 4, 12 + my_prod_sum * 2)
+                    if pool_rem < min_need <= pool_rem + wait_budget:
+                        defer_low_yield = True
+                        break
             if defer_low_yield:
                 continue
 
@@ -2081,9 +2260,19 @@ def _build_capture_plan(snap: Snapshot, mode: str,
             avail = max(0, snap.avail(src.id) - local_used[src.id])
             # Do not strip inner sun-belt planets for outer “passing” neutrals once
             # the mid-game contest starts (rotation drags these into enemy arcs).
+            ffa_pocket_neu = (
+                state.is_ffa_mode()
+                and dst.owner == -1
+                and dst.production >= 2
+                and min((m.dist(dst) for m in state.my_pl), default=999.0) < 48.0
+            )
             if mode in ("expand", "balanced") and is_sun_belt_planet(state, src):
                 if dst.owner == -1 and not is_sun_belt_planet(state, dst):
-                    if len(state.my_pl) >= 2 and (en_belt or state.phase() != "early"):
+                    if (
+                        len(state.my_pl) >= 2
+                        and (en_belt or state.phase() != "early")
+                        and not ffa_pocket_neu
+                    ):
                         hoard = 14 + src.production * 5
                         if state.phase() in ("mid", "late"):
                             hoard += 8
@@ -2493,9 +2682,16 @@ class RedistributionPlanner:
             avail = max(0, snap.avail(rear.id) - local_used[rear.id])
             # v17: raise threshold - only redistribute when rear has a meaningful
             # surplus (>= 20 ships). Small trickles just clutter the board.
-            if avail < max(20, rear.production * 5):
+            min_av = max(20, rear.production * 5)
+            if state.is_ffa_mode() and state.phase() == "early":
+                nearest_front = min((rear.dist(f) for f in fronts), default=999.0)
+                if nearest_front <= 42.0:
+                    min_av = max(14, rear.production * 4)
+            if avail < min_av:
                 continue
             dst = min(fronts, key=lambda f: rear.dist(f))
+            if state.is_ffa_mode() and state.phase() == "early" and rear.dist(dst) > 48.0:
+                continue
             # Send at most 40% of surplus so rear keeps a buffer.
             send = max(ABS_MIN_BATCH, min(avail, max(12, int(avail * 0.40))))
             if send >= ABS_MIN_BATCH:
@@ -2517,15 +2713,28 @@ class UrgentHighProdPlanner:
             return Plan([], 0.0, "urgent_hp", urgent=True)
 
         my_total = state.total_ships(state.my_id)
-        en_total = sum(state.total_ships(e) for e in state.en_ids)
-        if my_total < en_total * policy.urgent_attack_ratio:
+        if state.is_ffa_mode() and state.en_ids:
+            en_cmp = max(state.total_ships(e) for e in state.en_ids)
+        else:
+            en_cmp = sum(state.total_ships(e) for e in state.en_ids)
+        if my_total < en_cmp * policy.urgent_attack_ratio:
             return Plan([], 0.0, "urgent_hp", urgent=True)
 
         cx, cy = snap.centroid
+        near_r = 48.0
+
+        def _urgent_hp_near(p) -> bool:
+            d_c = math.hypot(p.x - cx, p.y - cy)
+            if d_c < 40.0:
+                return True
+            if state.is_ffa_mode() and state.my_pl:
+                return min(m.dist(p) for m in state.my_pl) < near_r
+            return False
+
         targets = sorted(
             [p for p in state.en_pl
              if p.production >= policy.urgent_attack_min_prod
-             and math.hypot(p.x - cx, p.y - cy) < 40],
+             and _urgent_hp_near(p)],
             key=lambda p: -(p.production / max(1.0, math.hypot(p.x - cx, p.y - cy))),
         )
         if not targets:

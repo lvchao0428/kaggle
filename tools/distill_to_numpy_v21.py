@@ -57,7 +57,12 @@ def collect_state_targets(
     shards_dir: Path, teacher: torch.nn.Module, device: torch.device, plan_pad: int
 ):
     xs: List[np.ndarray] = []
-    for shard in sorted(shards_dir.glob("shard_w*.msgpack")):
+    shard_paths = sorted(shards_dir.glob("shard_w*.msgpack"))
+    arch = shards_dir / "shard_archive"
+    if arch.is_dir():
+        shard_paths.extend(sorted(arch.glob("shard_w*.msgpack")))
+    shard_paths = sorted(set(shard_paths))
+    for shard in shard_paths:
         try:
             with open(shard, "rb") as f:
                 payload = msgpack.unpack(f, raw=False)

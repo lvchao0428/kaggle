@@ -139,6 +139,11 @@ def main():
         action="store_true",
         help="Pass to rollout_worker: no per-game stdout/jsonl",
     )
+    ap.add_argument(
+        "--archive-shards",
+        action="store_true",
+        help="Pass to learner_v21: move consumed shards to runs-dir/shard_archive/ instead of deleting",
+    )
     args = ap.parse_args()
 
     runs_dir = Path(args.runs_dir).resolve()
@@ -236,6 +241,8 @@ def main():
             "--wait-secs",
             str(args.wait_secs),
         ]
+        if args.archive_shards:
+            lcmd.append("--archive-shards")
         r = subprocess.run(lcmd, cwd=str(ROOT))
         if r.returncode != 0:
             logger.error("learner failed exit=%s", r.returncode)
